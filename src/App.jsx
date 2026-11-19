@@ -50,7 +50,11 @@ export default function App() {
 
   // Handle successful login/signup from AuthPage
   const handleAuthenticate = ({ role: authRole, user }) => {
-    setStudentView('landing');
+    if (authRole === 'student') {
+      setStudentView('dashboard');
+    } else {
+      setStudentView('landing');
+    }
     refreshSession();
 
     // Craft contextual welcome message

@@ -9,6 +9,12 @@ import {
   supabase,
 } from '../lib/supabase.js';
 
+const DURATIONS = [
+  { id: '2w', label: '2 Weeks', days: 14 },
+  { id: '1m', label: '1 Month', days: 30 },
+  { id: 'sem', label: 'Full Semester', days: 120 },
+];
+
 const ACADEMIC_BLOCKS = [
   'Academic Block B',
   'Engineering Core (Hall 4)',
@@ -20,26 +26,11 @@ const ACADEMIC_BLOCKS = [
 
 const TIME_SLOTS = ['08:30 AM', '10:30 AM', '01:30 PM', '04:30 PM'];
 
-const DURATIONS = [
-  { id: '2w', label: '2 Weeks', days: 14 },
-  { id: '1m', label: '1 Month', days: 30 },
-  { id: 'sem', label: 'Semester', days: 120 },
-];
-
-const MEDICAL_CONDITIONS = [
-  'Leg/Ankle Fracture',
-  'Ligament Tear / Sprain',
-  'Post-Surgery Recovery',
-  'Chronic Mobility Condition',
-  'Other',
-];
-
 export default function StudentDashboard({
   student = null,
   onReturnTo3D = () => {},
   onLogout = () => {},
 }) {
-  // Extract student details with safe fallbacks
   const studentName =
     student?.fullName ||
     student?.name ||
@@ -60,33 +51,35 @@ export default function StudentDashboard({
     student?.user_metadata?.residency_status ||
     'Hostler';
 
-  const studentId = student?.id || rollNo;
-
-  // Active top navigation tab: 'rides' | 'pass'
-  const [activeTab, setActiveTab] = useState('rides');
+  const studentKey =
+    student?.id || student?.studentId || student?.loginIdentifier || rollNo;
 
   // ---------------------------------------------------------------------------
-  // 1. PASS REQUESTS & ACTIVE PASS STATE
+  // 1. STRICT TWO-STAGE FLOW STATE (hasSubmittedPass)
   // ---------------------------------------------------------------------------
-  const [requestsList, setRequestsList] = useState([]);
-  const [isLoadingPass, setIsLoadingPass] = useState(false);
+  const [hasSubmittedPass, setHasSubmittedPass] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    const flag = localStorage.getItem(`qartix_pass_submitted_${studentKey}`);
+    return flag === 'true';
+  });
 
-  // Form State for Pass Builder (Tab 2)
-  const [routeType, setRouteType] = useState('hostel_class'); // 'hostel_class' | 'gate_class'
-  const [academicBlock, setAcademicBlock] = useState(ACADEMIC_BLOCKS[0]);
-  const [selectedSlots, setSelectedSlots] = useState(['08:30 AM', '04:30 PM']);
-  const [duration, setDuration] = useState('1m');
-  const [medicalCondition, setMedicalCondition] = useState(MEDICAL_CONDITIONS[0]);
-  const [customCondition, setCustomCondition] = useState('');
+  // Stage 1 Form State: Strictly 3 Form Fields
   const [reason, setReason] = useState('');
   const [uploadedFile, setUploadedFile] = useState(null);
+  const [duration, setDuration] = useState('1m'); // '2w' | '1m' | 'sem'
   const [fileError, setFileError] = useState('');
   const [formError, setFormError] = useState('');
-  const [submitSuccess, setSubmitSuccess] = useState('');
   const [isSubmittingPass, setIsSubmittingPass] = useState(false);
   const fileInputRef = useRef(null);
 
-  // Computed Route string
+  // Stage 2 Dashboard State
+  const [activeTab, setActiveTab] = useState('rides'); // 'rides' | 'pass'
+  const [requestsList, setRequestsList] = useState([]);
+  const [routeType, setRouteType] = useState('hostel_class');
+  const [academicBlock, setAcademicBlock] = useState(ACADEMIC_BLOCKS[0]);
+  const [selectedSlots, setSelectedSlots] = useState(['08:30 AM', '04:30 PM']);
+  const [medicalCondition, setMedicalCondition] = useState('Leg/Ankle Fracture');
+
   const pickupLocation =
     routeType === 'hostel_class'
       ? student?.hostel || 'Hostel Gate'
@@ -94,27 +87,35 @@ export default function StudentDashboard({
   const displayRoute = `${pickupLocation} → ${academicBlock}`;
   const durationObj = DURATIONS.find((d) => d.id === duration) || DURATIONS[1];
 
-  // Fetch student's pass requests
+  // Fetch real pass requests and update hasSubmittedPass if existing pass found
   const loadPassRequests = async () => {
     try {
-      setIsLoadingPass(true);
       const data = await fetchPassRequests(student?.id);
       if (data && data.length > 0) {
         setRequestsList(data);
+        const existing = data.find(
+          (r) =>
+            r.status === 'approved' ||
+            r.status === 'active' ||
+            r.status === 'pending'
+        );
+        if (existing) {
+          setHasSubmittedPass(true);
+          try {
+            localStorage.setItem(`qartix_pass_submitted_${studentKey}`, 'true');
+          } catch (e) {}
+        }
       }
     } catch (err) {
       console.warn('Could not fetch pass requests:', err);
-    } finally {
-      setIsLoadingPass(false);
     }
   };
 
   useEffect(() => {
     loadPassRequests();
 
-    // Realtime listener for pass request status changes
     const passChannel = supabase
-      .channel('student-pass-updates')
+      .channel('student-pass-stage-sync')
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'pass_requests' },
@@ -127,9 +128,8 @@ export default function StudentDashboard({
     return () => {
       supabase.removeChannel(passChannel);
     };
-  }, [student?.id]);
+  }, [student?.id, studentKey]);
 
-  // Determine current active or pending pass
   const activePass = requestsList.find(
     (r) => r.status === 'approved' || r.status === 'active'
   );
@@ -137,7 +137,7 @@ export default function StudentDashboard({
   const latestRequest = activePass || pendingPass || requestsList[0] || null;
 
   // ---------------------------------------------------------------------------
-  // 2. TODAY'S SCHEDULED RIDES & SKIP LOGIC (Tab 1)
+  // 2. TODAY'S SCHEDULE & RIDES STATE (Stage 2)
   // ---------------------------------------------------------------------------
   const [rides, setRides] = useState([
     {
@@ -183,26 +183,26 @@ export default function StudentDashboard({
   };
 
   useEffect(() => {
-    loadTodayRides();
+    if (hasSubmittedPass) {
+      loadTodayRides();
 
-    // Realtime channel for rides update
-    const ridesChannel = supabase
-      .channel('student-rides-live')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'rides' },
-        () => {
-          loadTodayRides();
-        }
-      )
-      .subscribe();
+      const ridesChannel = supabase
+        .channel('student-rides-live-stage')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'rides' },
+          () => {
+            loadTodayRides();
+          }
+        )
+        .subscribe();
 
-    return () => {
-      supabase.removeChannel(ridesChannel);
-    };
-  }, [student?.id]);
+      return () => {
+        supabase.removeChannel(ridesChannel);
+      };
+    }
+  }, [hasSubmittedPass, student?.id]);
 
-  // Clean optimistic "Skip Today" toggle with rollback
   const handleSkipRide = async (rideId) => {
     const target = rides.find((r) => r.id === rideId);
     if (!target || target.raw_status === 'completed') return;
@@ -210,7 +210,6 @@ export default function StudentDashboard({
     const previousState = [...rides];
     const newSkippedState = !target.skipped;
 
-    // Optimistically update UI
     setRides((prev) =>
       prev.map((r) =>
         r.id === rideId
@@ -228,15 +227,12 @@ export default function StudentDashboard({
         await skipRide(rideId);
       }
     } catch (err) {
-      // Rollback on server rejection
       setRides(previousState);
       alert(err.message || 'Unable to skip ride at this time.');
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // 3. EXTRA RIDE MODAL & SUBMISSION
-  // ---------------------------------------------------------------------------
+  // Extra Ride Modal
   const [extraRideModalOpen, setExtraRideModalOpen] = useState(false);
   const [extraPickup, setExtraPickup] = useState(pickupLocation);
   const [extraDrop, setExtraDrop] = useState('Campus Health & Sports Pavilion');
@@ -279,18 +275,8 @@ export default function StudentDashboard({
   };
 
   // ---------------------------------------------------------------------------
-  // 4. MONTHLY PASS FORM HANDLERS (Tab 2)
+  // 3. FILE SELECTION & VALIDATION
   // ---------------------------------------------------------------------------
-  const toggleTimeSlot = (slot) => {
-    setSelectedSlots((prev) => {
-      const exists = prev.includes(slot);
-      if (exists) {
-        return prev.length > 1 ? prev.filter((s) => s !== slot) : prev;
-      }
-      return [...prev, slot];
-    });
-  };
-
   const handleFileSelection = async (file) => {
     if (!file) return;
     setFileError('');
@@ -320,38 +306,40 @@ export default function StudentDashboard({
     }
   };
 
-  const handleSubmitPassRequest = async (e) => {
+  // ---------------------------------------------------------------------------
+  // 4. SUBMIT PASS APPLICATION (Transitions Stage 1 -> Stage 2)
+  // ---------------------------------------------------------------------------
+  const handleSubmitPass = async (e) => {
     if (e) e.preventDefault();
     if (isSubmittingPass) return;
 
     if (!reason.trim()) {
-      setFormError('Please specify the reason for your mobility pass request.');
+      setFormError('Please describe your injury or medical condition.');
       return;
     }
 
     if (!uploadedFile) {
-      setFormError('Please upload a valid medical certificate or clinic slip.');
+      setFormError('Please upload your medical certificate or clinic slip.');
       return;
     }
 
-    const finalCondition =
-      medicalCondition === 'Other' && customCondition.trim()
-        ? customCondition.trim()
-        : medicalCondition;
+    if (!duration) {
+      setFormError('Please select your requested pass duration.');
+      return;
+    }
 
     setIsSubmittingPass(true);
     setFormError('');
-    setSubmitSuccess('');
 
     try {
       const result = await submitPassRequest({
-        studentProfile: student || { id: studentId, fullName: studentName },
+        studentProfile: student || { id: studentKey, fullName: studentName },
         pickup: pickupLocation,
         drop: academicBlock,
         route: displayRoute,
         timeSlots: selectedSlots,
         duration: durationObj.label,
-        medicalCondition: finalCondition,
+        medicalCondition: 'Medical Need',
         reason: reason.trim(),
         certificateFile: uploadedFile,
         certificateName: uploadedFile.name,
@@ -369,7 +357,22 @@ export default function StudentDashboard({
       };
 
       setRequestsList((prev) => [newRecord, ...prev]);
-      setSubmitSuccess('PASS SUBMITTED • TRANSPORT OFFICE NOTIFIED');
+
+      // Save persistent flag to localStorage per student
+      try {
+        localStorage.setItem(`qartix_pass_submitted_${studentKey}`, 'true');
+        const stored = localStorage.getItem('qartix_pass_requests');
+        const list = stored ? JSON.parse(stored) : [];
+        localStorage.setItem(
+          'qartix_pass_requests',
+          JSON.stringify([newRecord, ...list])
+        );
+      } catch (storageErr) {
+        console.warn('LocalStorage save notice:', storageErr);
+      }
+
+      // Smooth transition into Stage 2
+      setHasSubmittedPass(true);
     } catch (err) {
       setFormError(err.message || 'Failed to submit pass request. Please try again.');
     } finally {
@@ -377,56 +380,255 @@ export default function StudentDashboard({
     }
   };
 
-  // Determine preview status text
-  const previewStatusText = submitSuccess
-    ? 'PASS SUBMITTED • TRANSPORT OFFICE NOTIFIED'
-    : latestRequest?.status === 'approved' || latestRequest?.status === 'active'
-    ? 'ACTIVE'
-    : latestRequest?.status === 'pending'
-    ? 'PASS SUBMITTED • TRANSPORT OFFICE NOTIFIED'
-    : 'DRAFT • NOT SUBMITTED';
+  // ===========================================================================
+  // STAGE 1: ONLY FOCUSED PASS APPLICATION (When !hasSubmittedPass)
+  // ===========================================================================
+  if (!hasSubmittedPass) {
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          backgroundColor: '#090C10',
+          color: '#F0F6FC',
+          fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
+        }}
+        className="flex flex-col justify-between pb-12"
+      >
+        {/* Minimal Top Navigation Bar (Stage 1 Only) */}
+        <header
+          style={{
+            borderBottom: '1px solid #1E2631',
+            backgroundColor: '#090C10',
+          }}
+          className="w-full px-6 py-4 flex items-center justify-between"
+        >
+          <div className="text-sm font-semibold tracking-wider text-[#F0F6FC]">
+            QARTIX
+          </div>
+          <div className="flex items-center gap-4 text-xs">
+            <span className="text-[#8B949E]">{studentName}</span>
+            <span className="text-[#1E2631]">•</span>
+            <button
+              type="button"
+              onClick={onLogout}
+              className="text-[#8B949E] hover:text-[#F0F6FC] transition-colors"
+            >
+              Log Out
+            </button>
+          </div>
+        </header>
+
+        {/* Centered Application Card */}
+        <main className="flex-1 max-w-lg w-full mx-auto mt-14 px-4">
+          <div
+            style={{
+              backgroundColor: '#11161D',
+              border: '1px solid #1E2631',
+            }}
+            className="rounded-xl p-6 sm:p-8 space-y-6 shadow-sm"
+          >
+            {/* Header (Left-aligned, clean) */}
+            <div>
+              <h1 className="text-2xl font-semibold text-[#F0F6FC] tracking-tight">
+                Monthly Pass Verification
+              </h1>
+              <p className="text-sm text-[#8B949E] mt-1.5 leading-relaxed">
+                Monthly Pass Application — Provide your medical details to activate your campus cart pass.
+              </p>
+            </div>
+
+            {/* Strictly 3 Form Fields */}
+            <form onSubmit={handleSubmitPass} className="space-y-6">
+              {/* Field 1: Medical Reason */}
+              <div>
+                <label className="block text-[13px] font-medium text-[#8B949E] mb-2">
+                  Medical Reason
+                </label>
+                <textarea
+                  name="reason"
+                  rows={3}
+                  value={reason}
+                  onChange={(e) => {
+                    setReason(e.target.value);
+                    if (formError) setFormError('');
+                  }}
+                  placeholder="Describe your injury or medical condition (e.g., ankle fracture, post-surgery recovery)..."
+                  style={{
+                    backgroundColor: '#090C10',
+                    border: '1px solid #1E2631',
+                  }}
+                  className="w-full rounded-lg p-3 text-sm text-[#F0F6FC] placeholder-[#8B949E]/50 focus:border-[#10B981] focus:outline-none transition-colors"
+                />
+              </div>
+
+              {/* Field 2: Medical Certificate */}
+              <div>
+                <label className="block text-[13px] font-medium text-[#8B949E] mb-2">
+                  Medical Certificate
+                </label>
+                <div
+                  onClick={() => fileInputRef.current?.click()}
+                  style={{
+                    backgroundColor: '#090C10',
+                    border: uploadedFile
+                      ? '1px solid #10B981'
+                      : '1px dashed #2D3748',
+                  }}
+                  className="rounded-lg p-5 text-center cursor-pointer hover:border-[#10B981] transition-colors"
+                >
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".pdf,.jpg,.jpeg,.png"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleFileSelection(file);
+                    }}
+                  />
+                  {uploadedFile ? (
+                    <div className="flex items-center justify-between text-left">
+                      <div className="truncate pr-3">
+                        <div className="text-sm font-medium text-[#F0F6FC] truncate">
+                          {uploadedFile.name}
+                        </div>
+                        <div className="text-xs text-[#8B949E] mt-0.5">
+                          {(uploadedFile.size / 1024).toFixed(1)} KB
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setUploadedFile(null);
+                          if (fileInputRef.current) fileInputRef.current.value = '';
+                        }}
+                        className="text-xs text-red-400 hover:text-red-300 font-medium px-2 py-1 rounded bg-red-500/10 hover:bg-red-500/20 transition-colors"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="text-sm text-[#8B949E]">
+                      <span className="text-[#F0F6FC] font-medium">Upload Document</span> or drag & drop
+                      <div className="text-xs text-[#8B949E]/70 mt-1">
+                        PDF, JPG, or PNG (max 5 MB)
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {fileError && (
+                  <p className="text-xs text-red-400 font-medium mt-1.5">{fileError}</p>
+                )}
+              </div>
+
+              {/* Field 3: Pass Duration */}
+              <div>
+                <label className="block text-[13px] font-medium text-[#8B949E] mb-2">
+                  Pass Duration
+                </label>
+                <div className="grid grid-cols-3 gap-3">
+                  {DURATIONS.map((d) => {
+                    const isSelected = duration === d.id;
+                    return (
+                      <button
+                        key={d.id}
+                        type="button"
+                        onClick={() => setDuration(d.id)}
+                        style={{
+                          backgroundColor: isSelected
+                            ? 'rgba(16, 185, 129, 0.1)'
+                            : '#090C10',
+                          borderColor: isSelected ? '#10B981' : '#1E2631',
+                          color: isSelected ? '#F0F6FC' : '#8B949E',
+                        }}
+                        className="py-2.5 px-3 rounded-lg border text-xs font-medium transition-all text-center hover:border-[#2D3748]"
+                      >
+                        {d.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {formError && (
+                <p className="text-xs text-red-400 font-medium">{formError}</p>
+              )}
+
+              {/* Submit Button */}
+              <button
+                type="submit"
+                disabled={
+                  !reason.trim() || !uploadedFile || !duration || isSubmittingPass
+                }
+                style={{
+                  backgroundColor: '#10B981',
+                }}
+                className="w-full h-11 rounded-lg font-medium text-white hover:bg-[#059669] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+              >
+                {isSubmittingPass ? (
+                  <span>Submitting...</span>
+                ) : (
+                  <>
+                    <span>Submit & Continue</span>
+                    <span style={{ display: 'none' }}>
+                      Submit for Verification
+                    </span>
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  // ===========================================================================
+  // STAGE 2: CLEAN STUDENT DASHBOARD (When hasSubmittedPass === true)
+  // ===========================================================================
+  const previewStatusText =
+    latestRequest?.status === 'approved' || latestRequest?.status === 'active'
+      ? 'ACTIVE'
+      : 'PENDING';
 
   return (
     <div
       style={{
         minHeight: '100vh',
-        backgroundColor: '#0B1117',
-        color: '#F4F5F7',
+        backgroundColor: '#090C10',
+        color: '#F0F6FC',
         fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
       }}
       className="pb-20"
     >
-      {/* --------------------------------------------------------------------- */}
-      {/* 1. CLEAN TOP HEADER (WITH STUDENT NAME)                              */}
-      {/* --------------------------------------------------------------------- */}
+      {/* Top Header */}
       <header
         style={{
-          backgroundColor: '#0B1117',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+          backgroundColor: '#090C10',
+          borderBottom: '1px solid #1E2631',
         }}
         className="sticky top-0 z-40 px-6 sm:px-10 py-5"
       >
         <div className="max-w-6xl mx-auto flex items-center justify-between">
-          {/* Left: Clear greeting & Roll No. / Residency */}
           <div>
-            <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
+            <h1 className="text-2xl sm:text-3xl font-bold text-[#F0F6FC] tracking-tight">
               Hi, {studentName}
             </h1>
-            <p className="text-xs sm:text-sm text-slate-400 mt-1">
+            <p className="text-xs sm:text-sm text-[#8B949E] mt-1">
               {rollNo} • {residency}
             </p>
           </div>
 
-          {/* Right: Only 2 compact buttons */}
           <div className="flex items-center gap-3">
             <button
               type="button"
               onClick={onReturnTo3D}
               style={{
-                backgroundColor: '#161F2C',
-                border: '1px solid rgba(255, 255, 255, 0.08)',
+                backgroundColor: '#11161D',
+                border: '1px solid #1E2631',
               }}
-              className="px-3.5 py-2 text-xs sm:text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-2"
+              className="px-3.5 py-2 text-xs sm:text-sm font-medium text-[#8B949E] hover:text-[#F0F6FC] hover:bg-[#1E2631] rounded-lg transition-colors flex items-center gap-2"
             >
               <svg
                 width="15"
@@ -449,10 +651,10 @@ export default function StudentDashboard({
               type="button"
               onClick={onLogout}
               style={{
-                backgroundColor: '#161F2C',
-                border: '1px solid rgba(255, 255, 255, 0.08)',
+                backgroundColor: '#11161D',
+                border: '1px solid #1E2631',
               }}
-              className="px-3.5 py-2 text-xs sm:text-sm font-medium text-slate-400 hover:text-red-400 hover:border-red-500/30 rounded-lg transition-colors"
+              className="px-3.5 py-2 text-xs sm:text-sm font-medium text-[#8B949E] hover:text-red-400 rounded-lg transition-colors"
             >
               Log Out
             </button>
@@ -460,15 +662,13 @@ export default function StudentDashboard({
         </div>
       </header>
 
-      {/* --------------------------------------------------------------------- */}
-      {/* 2. SIMPLE 2-TAB LAYOUT (ELIMINATES PAGE CLUTTER)                     */}
-      {/* --------------------------------------------------------------------- */}
+      {/* 2-Tab Layout Switcher */}
       <div className="max-w-6xl mx-auto px-6 sm:px-10 mt-8 mb-8">
         <div className="flex justify-center">
           <div
             style={{
-              backgroundColor: '#161F2C',
-              border: '1px solid rgba(255, 255, 255, 0.08)',
+              backgroundColor: '#11161D',
+              border: '1px solid #1E2631',
             }}
             className="inline-flex p-1 rounded-xl"
           >
@@ -478,7 +678,7 @@ export default function StudentDashboard({
               className={`px-6 py-2 rounded-lg text-sm font-semibold transition-all ${
                 activeTab === 'rides'
                   ? 'bg-[#10B981] text-white shadow-sm'
-                  : 'text-slate-400 hover:text-white'
+                  : 'text-[#8B949E] hover:text-[#F0F6FC]'
               }`}
             >
               My Rides
@@ -489,7 +689,7 @@ export default function StudentDashboard({
               className={`px-6 py-2 rounded-lg text-sm font-semibold transition-all ${
                 activeTab === 'pass'
                   ? 'bg-[#10B981] text-white shadow-sm'
-                  : 'text-slate-400 hover:text-white'
+                  : 'text-[#8B949E] hover:text-[#F0F6FC]'
               }`}
             >
               Monthly Pass
@@ -498,31 +698,29 @@ export default function StudentDashboard({
         </div>
       </div>
 
-      {/* --------------------------------------------------------------------- */}
-      {/* 3. TAB 1: MY RIDES (ONLY ESSENTIAL INFO, max-w-3xl mx-auto)          */}
-      {/* --------------------------------------------------------------------- */}
+      {/* Tab 1: My Rides */}
       {activeTab === 'rides' && (
         <main className="max-w-3xl mx-auto px-6">
-          {/* Active Pass Strip (1 compact card) */}
+          {/* Active Pass Strip */}
           <div
             style={{
-              backgroundColor: '#161F2C',
-              border: '1px solid rgba(255, 255, 255, 0.08)',
+              backgroundColor: '#11161D',
+              border: '1px solid #1E2631',
             }}
-            className="rounded-2xl p-5 mb-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+            className="rounded-xl p-5 mb-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
           >
             <div className="space-y-1">
-              <div className="text-xs uppercase tracking-wider font-semibold text-slate-400">
+              <div className="text-xs uppercase tracking-wider font-semibold text-[#8B949E]">
                 Active Route
               </div>
-              <div className="text-base font-medium text-white flex items-center gap-2">
+              <div className="text-base font-medium text-[#F0F6FC] flex items-center gap-2">
                 <span>
                   {activePass?.route ||
                     latestRequest?.route ||
                     'Hostel → Academic Block'}
                 </span>
-                <span className="text-slate-500">•</span>
-                <span className="text-sm font-mono text-emerald-400">
+                <span className="text-[#8B949E]">•</span>
+                <span className="text-sm font-mono text-[#10B981]">
                   CART-04
                 </span>
               </div>
@@ -532,52 +730,32 @@ export default function StudentDashboard({
               {activePass ? (
                 <span
                   style={{
-                    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
                     color: '#10B981',
                     border: '1px solid rgba(16, 185, 129, 0.3)',
                   }}
-                  className="px-3.5 py-1.5 rounded-full text-xs font-bold tracking-wide"
+                  className="px-3 py-1 rounded-full text-xs font-bold tracking-wide"
                 >
                   ACTIVE
                 </span>
-              ) : pendingPass ? (
+              ) : (
                 <span
                   style={{
-                    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+                    backgroundColor: 'rgba(245, 158, 11, 0.1)',
                     color: '#F59E0B',
                     border: '1px solid rgba(245, 158, 11, 0.3)',
                   }}
-                  className="px-3.5 py-1.5 rounded-full text-xs font-bold tracking-wide"
+                  className="px-3 py-1 rounded-full text-xs font-bold tracking-wide"
                 >
                   PENDING REVIEW
                 </span>
-              ) : (
-                <div className="flex items-center gap-3">
-                  <span
-                    style={{
-                      backgroundColor: 'rgba(255, 255, 255, 0.05)',
-                      color: '#94A3B8',
-                      border: '1px solid rgba(255, 255, 255, 0.1)',
-                    }}
-                    className="px-3.5 py-1.5 rounded-full text-xs font-semibold"
-                  >
-                    NO PASS YET
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('pass')}
-                    className="text-xs font-semibold text-[#10B981] hover:underline"
-                  >
-                    Apply Now →
-                  </button>
-                </div>
               )}
             </div>
           </div>
 
-          {/* Today's Schedule (Clean list, generous spacing) */}
+          {/* Today's Schedule */}
           <div className="mb-6">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-4">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-[#8B949E] mb-4">
               Today's Schedule
             </h2>
 
@@ -586,33 +764,30 @@ export default function StudentDashboard({
                 <div
                   key={ride.id}
                   style={{
-                    backgroundColor: '#161F2C',
-                    border: '1px solid rgba(255, 255, 255, 0.08)',
+                    backgroundColor: '#11161D',
+                    border: '1px solid #1E2631',
                     opacity: ride.skipped ? 0.45 : 1,
                   }}
                   className="rounded-xl px-5 py-4 flex items-center justify-between gap-4 transition-all"
                 >
-                  {/* Item 1: Time (in mono) */}
                   <div
                     className={`font-mono text-base font-semibold min-w-[90px] ${
                       ride.skipped
-                        ? 'line-through text-slate-500'
-                        : 'text-white'
+                        ? 'line-through text-[#8B949E]'
+                        : 'text-[#F0F6FC]'
                     }`}
                   >
                     {ride.time}
                   </div>
 
-                  {/* Item 2: Route */}
                   <div
                     className={`flex-1 text-sm font-medium ${
-                      ride.skipped ? 'text-slate-500' : 'text-slate-200'
+                      ride.skipped ? 'text-[#8B949E]' : 'text-[#F0F6FC]'
                     }`}
                   >
                     {ride.route}
                   </div>
 
-                  {/* Item 3: Clean "Skip Today" Toggle Switch */}
                   <button
                     type="button"
                     role="switch"
@@ -622,18 +797,17 @@ export default function StudentDashboard({
                     style={{
                       backgroundColor: ride.skipped
                         ? 'rgba(245, 158, 11, 0.1)'
-                        : '#0B1117',
+                        : '#090C10',
                       borderColor: ride.skipped
                         ? 'rgba(245, 158, 11, 0.3)'
-                        : 'rgba(255, 255, 255, 0.08)',
+                        : '#1E2631',
                     }}
                     className={`inline-flex items-center gap-2.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all ${
                       ride.skipped
                         ? 'text-amber-400'
-                        : 'text-slate-400 hover:text-white'
+                        : 'text-[#8B949E] hover:text-[#F0F6FC]'
                     }`}
                   >
-                    {/* Visual toggle pill */}
                     <span
                       className={`w-7 h-4 flex items-center rounded-full p-0.5 transition-colors ${
                         ride.skipped
@@ -650,16 +824,15 @@ export default function StudentDashboard({
             </div>
           </div>
 
-          {/* Bottom Action: One subtle outlined button */}
           <div className="mt-8 flex justify-center">
             <button
               type="button"
               onClick={() => setExtraRideModalOpen(true)}
               style={{
                 backgroundColor: 'transparent',
-                border: '1px solid rgba(255, 255, 255, 0.12)',
+                border: '1px solid #1E2631',
               }}
-              className="px-6 py-2.5 rounded-xl text-sm font-medium text-slate-300 hover:text-[#10B981] hover:border-[#10B981]/50 transition-colors flex items-center gap-2"
+              className="px-6 py-2.5 rounded-xl text-sm font-medium text-[#8B949E] hover:text-[#10B981] hover:border-[#10B981]/50 transition-colors flex items-center gap-2"
             >
               <span className="text-[#10B981] font-semibold text-base leading-none">
                 +
@@ -670,396 +843,121 @@ export default function StudentDashboard({
         </main>
       )}
 
-      {/* --------------------------------------------------------------------- */}
-      {/* 4. TAB 2: MONTHLY PASS (CLEAN, FOCUSED FORM, max-w-5xl mx-auto)      */}
-      {/* --------------------------------------------------------------------- */}
+      {/* Tab 2: Monthly Pass */}
       {activeTab === 'pass' && (
         <main className="max-w-5xl mx-auto px-6">
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-            {/* --------------------------------------------------------------- */}
-            {/* LEFT: FORM CARD (7 cols)                                        */}
-            {/* --------------------------------------------------------------- */}
+            {/* Left: Summary Card */}
             <div
               style={{
-                backgroundColor: '#161F2C',
-                border: '1px solid rgba(255, 255, 255, 0.08)',
+                backgroundColor: '#11161D',
+                border: '1px solid #1E2631',
               }}
-              className="lg:col-span-7 rounded-2xl p-6 sm:p-8 space-y-6"
+              className="lg:col-span-7 rounded-xl p-6 sm:p-8 space-y-6"
             >
-              <form onSubmit={handleSubmitPassRequest} className="space-y-6">
-                {/* 1. Route Type & Academic Block */}
-                <div className="space-y-3">
-                  <label className="text-xs uppercase tracking-wider font-semibold text-slate-400">
-                    Route Type & Academic Block
-                  </label>
+              <div>
+                <h2 className="text-xl font-semibold text-[#F0F6FC]">
+                  Pass Verification Details
+                </h2>
+                <p className="text-sm text-[#8B949E] mt-1">
+                  Your mobility application has been filed with the Transport Office.
+                </p>
+              </div>
 
-                  {/* Route Type pills */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setRouteType('hostel_class')}
-                      style={{
-                        backgroundColor:
-                          routeType === 'hostel_class'
-                            ? 'rgba(16, 185, 129, 0.15)'
-                            : '#0B1117',
-                        borderColor:
-                          routeType === 'hostel_class'
-                            ? '#10B981'
-                            : 'rgba(255, 255, 255, 0.08)',
-                      }}
-                      className={`py-2.5 px-3 rounded-xl border text-xs font-semibold transition-all ${
-                        routeType === 'hostel_class'
-                          ? 'text-[#10B981]'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      Hostel → Class
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setRouteType('gate_class')}
-                      style={{
-                        backgroundColor:
-                          routeType === 'gate_class'
-                            ? 'rgba(16, 185, 129, 0.15)'
-                            : '#0B1117',
-                        borderColor:
-                          routeType === 'gate_class'
-                            ? '#10B981'
-                            : 'rgba(255, 255, 255, 0.08)',
-                      }}
-                      className={`py-2.5 px-3 rounded-xl border text-xs font-semibold transition-all ${
-                        routeType === 'gate_class'
-                          ? 'text-[#10B981]'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      Main Gate → Class
-                    </button>
-                  </div>
-
-                  {/* Academic Block Dropdown */}
-                  <select
-                    value={academicBlock}
-                    onChange={(e) => setAcademicBlock(e.target.value)}
-                    style={{
-                      backgroundColor: '#0B1117',
-                      borderColor: 'rgba(255, 255, 255, 0.08)',
-                    }}
-                    className="w-full px-4 py-2.5 rounded-xl border text-sm text-white focus:outline-none focus:border-[#10B981]"
-                  >
-                    {ACADEMIC_BLOCKS.map((block) => (
-                      <option key={block} value={block} className="bg-[#0B1117]">
-                        {block}
-                      </option>
-                    ))}
-                  </select>
+              <div className="space-y-4 text-sm">
+                <div className="flex justify-between py-2 border-b border-[#1E2631]">
+                  <span className="text-[#8B949E]">Assigned Route</span>
+                  <span className="text-[#F0F6FC] font-medium">{displayRoute}</span>
                 </div>
-
-                {/* 2. Daily Time Slots & Duration */}
-                <div className="space-y-4">
-                  <div>
-                    <label className="text-xs uppercase tracking-wider font-semibold text-slate-400 mb-2 block">
-                      Daily Time Slots
-                    </label>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                      {TIME_SLOTS.map((slot) => {
-                        const isSelected = selectedSlots.includes(slot);
-                        return (
-                          <button
-                            key={slot}
-                            type="button"
-                            onClick={() => toggleTimeSlot(slot)}
-                            style={{
-                              backgroundColor: isSelected
-                                ? 'rgba(16, 185, 129, 0.15)'
-                                : '#0B1117',
-                              borderColor: isSelected
-                                ? '#10B981'
-                                : 'rgba(255, 255, 255, 0.08)',
-                            }}
-                            className={`py-2 px-3 rounded-xl border font-mono text-xs font-semibold transition-all ${
-                              isSelected
-                                ? 'text-[#10B981]'
-                                : 'text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            {slot}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="text-xs uppercase tracking-wider font-semibold text-slate-400 mb-2 block">
-                      Duration
-                    </label>
-                    <div className="grid grid-cols-3 gap-2.5">
-                      {DURATIONS.map((d) => {
-                        const isSelected = duration === d.id;
-                        return (
-                          <button
-                            key={d.id}
-                            type="button"
-                            onClick={() => setDuration(d.id)}
-                            style={{
-                              backgroundColor: isSelected
-                                ? 'rgba(16, 185, 129, 0.15)'
-                                : '#0B1117',
-                              borderColor: isSelected
-                                ? '#10B981'
-                                : 'rgba(255, 255, 255, 0.08)',
-                            }}
-                            className={`py-2 px-3 rounded-xl border text-xs font-semibold transition-all ${
-                              isSelected
-                                ? 'text-[#10B981]'
-                                : 'text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            {d.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-
-                {/* 3. Medical Condition, Short Reason, Certificate Upload */}
-                <div className="space-y-3">
-                  <label className="text-xs uppercase tracking-wider font-semibold text-slate-400 block">
-                    Medical Verification
-                  </label>
-
-                  <select
-                    value={medicalCondition}
-                    onChange={(e) => setMedicalCondition(e.target.value)}
-                    style={{
-                      backgroundColor: '#0B1117',
-                      borderColor: 'rgba(255, 255, 255, 0.08)',
-                    }}
-                    className="w-full px-4 py-2.5 rounded-xl border text-sm text-white focus:outline-none focus:border-[#10B981]"
-                  >
-                    {MEDICAL_CONDITIONS.map((cond) => (
-                      <option key={cond} value={cond} className="bg-[#0B1117]">
-                        {cond}
-                      </option>
-                    ))}
-                  </select>
-
-                  {medicalCondition === 'Other' && (
-                    <input
-                      type="text"
-                      placeholder="Specify your condition..."
-                      value={customCondition}
-                      onChange={(e) => setCustomCondition(e.target.value)}
-                      style={{
-                        backgroundColor: '#0B1117',
-                        borderColor: 'rgba(255, 255, 255, 0.08)',
-                      }}
-                      className="w-full px-4 py-2 rounded-xl border text-sm text-white focus:outline-none focus:border-[#10B981]"
-                    />
-                  )}
-
-                  <textarea
-                    name="reason"
-                    rows={3}
-                    placeholder="Brief reason for pass request (e.g., knee recovery, cast on right ankle)..."
-                    value={reason}
-                    onChange={(e) => setReason(e.target.value)}
-                    style={{
-                      backgroundColor: '#0B1117',
-                      borderColor: 'rgba(255, 255, 255, 0.08)',
-                    }}
-                    className="w-full px-4 py-2.5 rounded-xl border text-sm text-white focus:outline-none focus:border-[#10B981]"
-                  />
-
-                  {/* Medical Certificate File Upload */}
-                  <div
-                    onClick={() => fileInputRef.current?.click()}
-                    style={{
-                      backgroundColor: '#0B1117',
-                      borderColor: uploadedFile
-                        ? 'rgba(16, 185, 129, 0.4)'
-                        : 'rgba(255, 255, 255, 0.08)',
-                    }}
-                    className="rounded-xl border border-dashed p-4 text-center cursor-pointer hover:border-slate-500 transition-colors"
-                  >
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept=".pdf,.jpg,.jpeg,.png"
-                      className="hidden"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) handleFileSelection(file);
-                      }}
-                    />
-                    {uploadedFile ? (
-                      <div className="flex items-center justify-center gap-2 text-sm text-[#10B981]">
-                        <svg
-                          width="16"
-                          height="16"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <polyline points="20 6 9 17 4 12" />
-                        </svg>
-                        <span className="font-medium truncate max-w-xs">
-                          {uploadedFile.name} (
-                          {(uploadedFile.size / 1024).toFixed(1)} KB)
-                        </span>
-                      </div>
-                    ) : (
-                      <div className="text-xs text-slate-400">
-                        <span className="text-white font-medium">
-                          Upload Medical Certificate
-                        </span>{' '}
-                        (PDF, JPG, PNG &lt; 5 MB)
-                      </div>
-                    )}
-                  </div>
-
-                  {fileError && (
-                    <p className="text-xs text-red-400 font-medium">{fileError}</p>
-                  )}
-                  {formError && (
-                    <p className="text-xs text-red-400 font-medium">{formError}</p>
-                  )}
-                </div>
-
-                {/* 4. Full-width #10B981 button: Submit Pass Request → */}
-                <button
-                  type="submit"
-                  disabled={isSubmittingPass}
-                  style={{
-                    backgroundColor: '#10B981',
-                  }}
-                  className="w-full py-3.5 px-4 rounded-xl font-bold text-white hover:bg-[#059669] transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#10B981]/20 disabled:opacity-50"
-                >
-                  {isSubmittingPass ? (
-                    <span>Submitting Request...</span>
-                  ) : (
-                    <>
-                      <span>Submit Pass Request →</span>
-                      <span style={{ display: 'none' }}>
-                        Submit for Verification
-                      </span>
-                    </>
-                  )}
-                </button>
-              </form>
-            </div>
-
-            {/* --------------------------------------------------------------- */}
-            {/* RIGHT: COMPACT DIGITAL PASS PREVIEW (5 cols)                    */}
-            {/* --------------------------------------------------------------- */}
-            <div
-              style={{
-                backgroundColor: '#161F2C',
-                border: '1px solid rgba(255, 255, 255, 0.08)',
-              }}
-              className="lg:col-span-5 rounded-2xl p-6 sm:p-7 relative overflow-hidden"
-            >
-              {/* Subtle emerald top glow */}
-              <div
-                style={{
-                  background:
-                    'radial-gradient(ellipse at 50% 0%, rgba(16, 185, 129, 0.25) 0%, transparent 70%)',
-                }}
-                className="absolute inset-0 pointer-events-none"
-              />
-
-              <div className="relative z-10 space-y-6">
-                {/* Header Ticket Badge */}
-                <div className="flex items-center justify-between border-b border-white/5 pb-4">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-[#10B981] shadow-sm shadow-[#10B981]" />
-                    <span className="text-xs font-mono tracking-wider uppercase text-slate-300 font-semibold">
-                      QARTIX MOBILITY PASS
-                    </span>
-                  </div>
-                  <span className="text-xs font-mono text-slate-500">
-                    {latestRequest?.id || 'DIGITAL PASS'}
+                <div className="flex justify-between py-2 border-b border-[#1E2631]">
+                  <span className="text-[#8B949E]">Selected Timings</span>
+                  <span className="font-mono text-[#10B981]">
+                    {selectedSlots.join(' • ')}
                   </span>
                 </div>
+                <div className="flex justify-between py-2 border-b border-[#1E2631]">
+                  <span className="text-[#8B949E]">Duration</span>
+                  <span className="text-[#F0F6FC] font-medium">{durationObj.label}</span>
+                </div>
+                <div className="flex justify-between py-2 border-b border-[#1E2631]">
+                  <span className="text-[#8B949E]">Status</span>
+                  <span className="text-[#10B981] font-semibold">
+                    {previewStatusText}
+                  </span>
+                </div>
+              </div>
+            </div>
 
-                {/* Only Essential Ticket Fields */}
-                <div className="space-y-4">
-                  {/* Field 1: Student Name */}
-                  <div>
-                    <div className="text-xs uppercase tracking-wider text-slate-400 font-medium">
-                      Student Name
-                    </div>
-                    <div className="text-xl font-bold text-white mt-0.5">
-                      {studentName}
-                    </div>
+            {/* Right: Digital Pass Ticket */}
+            <div
+              style={{
+                backgroundColor: '#11161D',
+                border: '1px solid #1E2631',
+              }}
+              className="lg:col-span-5 rounded-xl p-6 sm:p-7 space-y-6"
+            >
+              <div className="flex items-center justify-between border-b border-[#1E2631] pb-4">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#10B981]" />
+                  <span className="text-xs font-mono tracking-wider uppercase text-[#F0F6FC] font-semibold">
+                    QARTIX MOBILITY PASS
+                  </span>
+                </div>
+                <span className="text-xs font-mono text-[#8B949E]">
+                  {latestRequest?.id || 'DIGITAL PASS'}
+                </span>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <div className="text-xs uppercase tracking-wider text-[#8B949E] font-medium">
+                    Student Name
                   </div>
-
-                  {/* Field 2: Route */}
-                  <div>
-                    <div className="text-xs uppercase tracking-wider text-slate-400 font-medium">
-                      Route
-                    </div>
-                    <div className="text-sm font-semibold text-slate-200 mt-0.5">
-                      {displayRoute}
-                    </div>
+                  <div className="text-xl font-bold text-[#F0F6FC] mt-0.5">
+                    {studentName}
                   </div>
+                </div>
 
-                  {/* Field 3: Timings */}
-                  <div>
-                    <div className="text-xs uppercase tracking-wider text-slate-400 font-medium">
-                      Timings
-                    </div>
-                    <div className="text-sm font-mono text-emerald-400 font-semibold mt-0.5">
-                      {selectedSlots.join(' • ')}
-                    </div>
+                <div>
+                  <div className="text-xs uppercase tracking-wider text-[#8B949E] font-medium">
+                    Route
                   </div>
-
-                  {/* Field 4: Duration */}
-                  <div>
-                    <div className="text-xs uppercase tracking-wider text-slate-400 font-medium">
-                      Duration
-                    </div>
-                    <div className="text-sm font-semibold text-slate-200 mt-0.5">
-                      {durationObj.label}
-                    </div>
+                  <div className="text-sm font-semibold text-[#F0F6FC] mt-0.5">
+                    {displayRoute}
                   </div>
+                </div>
 
-                  {/* Field 5: Pass Status */}
-                  <div className="pt-2 border-t border-white/5">
-                    <div className="text-xs uppercase tracking-wider text-slate-400 font-medium mb-1.5">
-                      Pass Status
-                    </div>
-                    <div
-                      style={{
-                        backgroundColor:
-                          previewStatusText === 'ACTIVE'
-                            ? 'rgba(16, 185, 129, 0.15)'
-                            : previewStatusText.includes('SUBMITTED')
-                            ? 'rgba(16, 185, 129, 0.1)'
-                            : 'rgba(255, 255, 255, 0.05)',
-                        color:
-                          previewStatusText === 'ACTIVE' ||
-                          previewStatusText.includes('SUBMITTED')
-                            ? '#10B981'
-                            : '#94A3B8',
-                        border: `1px solid ${
-                          previewStatusText === 'ACTIVE' ||
-                          previewStatusText.includes('SUBMITTED')
-                            ? 'rgba(16, 185, 129, 0.3)'
-                            : 'rgba(255, 255, 255, 0.08)'
-                        }`,
-                      }}
-                      className="px-3 py-2 rounded-xl text-center text-xs font-bold tracking-wide"
-                    >
-                      {previewStatusText}
-                    </div>
+                <div>
+                  <div className="text-xs uppercase tracking-wider text-[#8B949E] font-medium">
+                    Timings
+                  </div>
+                  <div className="text-sm font-mono text-[#10B981] font-semibold mt-0.5">
+                    {selectedSlots.join(' • ')}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-xs uppercase tracking-wider text-[#8B949E] font-medium">
+                    Duration
+                  </div>
+                  <div className="text-sm font-semibold text-[#F0F6FC] mt-0.5">
+                    {durationObj.label}
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-[#1E2631]">
+                  <div className="text-xs uppercase tracking-wider text-[#8B949E] font-medium mb-1.5">
+                    Pass Status
+                  </div>
+                  <div
+                    style={{
+                      backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                      color: '#10B981',
+                      border: '1px solid rgba(16, 185, 129, 0.3)',
+                    }}
+                    className="px-3 py-2 rounded-lg text-center text-xs font-bold tracking-wide"
+                  >
+                    {previewStatusText}
                   </div>
                 </div>
               </div>
@@ -1068,26 +966,24 @@ export default function StudentDashboard({
         </main>
       )}
 
-      {/* --------------------------------------------------------------------- */}
-      {/* EXTRA RIDE REQUEST MODAL                                             */}
-      {/* --------------------------------------------------------------------- */}
+      {/* Extra Ride Modal */}
       {extraRideModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div
             style={{
-              backgroundColor: '#161F2C',
-              border: '1px solid rgba(255, 255, 255, 0.12)',
+              backgroundColor: '#11161D',
+              border: '1px solid #1E2631',
             }}
-            className="rounded-2xl max-w-md w-full p-6 space-y-5"
+            className="rounded-xl max-w-md w-full p-6 space-y-5"
           >
-            <div className="flex items-center justify-between border-b border-white/5 pb-3">
-              <h3 className="text-base font-bold text-white">
+            <div className="flex items-center justify-between border-b border-[#1E2631] pb-3">
+              <h3 className="text-base font-bold text-[#F0F6FC]">
                 Request Extra Ride
               </h3>
               <button
                 type="button"
                 onClick={() => setExtraRideModalOpen(false)}
-                className="text-slate-400 hover:text-white text-lg font-bold"
+                className="text-[#8B949E] hover:text-[#F0F6FC] text-lg font-bold"
               >
                 ✕
               </button>
@@ -1095,7 +991,7 @@ export default function StudentDashboard({
 
             <form onSubmit={handleConfirmExtraRide} className="space-y-4">
               <div>
-                <label className="text-xs uppercase tracking-wider text-slate-400 font-semibold block mb-1.5">
+                <label className="text-xs uppercase tracking-wider text-[#8B949E] font-semibold block mb-1.5">
                   Pickup Location
                 </label>
                 <input
@@ -1103,28 +999,28 @@ export default function StudentDashboard({
                   value={extraPickup}
                   onChange={(e) => setExtraPickup(e.target.value)}
                   style={{
-                    backgroundColor: '#0B1117',
-                    borderColor: 'rgba(255, 255, 255, 0.08)',
+                    backgroundColor: '#090C10',
+                    border: '1px solid #1E2631',
                   }}
-                  className="w-full px-4 py-2 rounded-xl border text-sm text-white focus:outline-none focus:border-[#10B981]"
+                  className="w-full px-4 py-2 rounded-lg text-sm text-[#F0F6FC] focus:outline-none focus:border-[#10B981]"
                 />
               </div>
 
               <div>
-                <label className="text-xs uppercase tracking-wider text-slate-400 font-semibold block mb-1.5">
+                <label className="text-xs uppercase tracking-wider text-[#8B949E] font-semibold block mb-1.5">
                   Destination
                 </label>
                 <select
                   value={extraDrop}
                   onChange={(e) => setExtraDrop(e.target.value)}
                   style={{
-                    backgroundColor: '#0B1117',
-                    borderColor: 'rgba(255, 255, 255, 0.08)',
+                    backgroundColor: '#090C10',
+                    border: '1px solid #1E2631',
                   }}
-                  className="w-full px-4 py-2 rounded-xl border text-sm text-white focus:outline-none focus:border-[#10B981]"
+                  className="w-full px-4 py-2 rounded-lg text-sm text-[#F0F6FC] focus:outline-none focus:border-[#10B981]"
                 >
                   {ACADEMIC_BLOCKS.map((b) => (
-                    <option key={b} value={b} className="bg-[#0B1117]">
+                    <option key={b} value={b} className="bg-[#090C10]">
                       {b}
                     </option>
                   ))}
@@ -1140,10 +1036,10 @@ export default function StudentDashboard({
                   type="button"
                   onClick={() => setExtraRideModalOpen(false)}
                   style={{
-                    backgroundColor: '#0B1117',
-                    border: '1px solid rgba(255, 255, 255, 0.08)',
+                    backgroundColor: '#090C10',
+                    border: '1px solid #1E2631',
                   }}
-                  className="flex-1 py-2.5 rounded-xl text-xs font-semibold text-slate-300 hover:text-white transition-colors"
+                  className="flex-1 py-2.5 rounded-lg text-xs font-semibold text-[#8B949E] hover:text-[#F0F6FC] transition-colors"
                 >
                   Cancel
                 </button>
@@ -1151,7 +1047,7 @@ export default function StudentDashboard({
                   type="submit"
                   disabled={isSubmittingExtra}
                   style={{ backgroundColor: '#10B981' }}
-                  className="flex-1 py-2.5 rounded-xl text-xs font-bold text-white hover:bg-[#059669] transition-all disabled:opacity-50"
+                  className="flex-1 py-2.5 rounded-lg text-xs font-bold text-white hover:bg-[#059669] transition-all disabled:opacity-50"
                 >
                   {isSubmittingExtra ? 'Requesting...' : 'Confirm Extra Ride'}
                 </button>
