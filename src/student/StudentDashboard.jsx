@@ -1,0 +1,1738 @@
+import React, { useState, useRef, useEffect } from 'react';
+
+/**
+ * Available Locations for Route Dropdowns
+ */
+const PICKUP_LOCATIONS = [
+  'Block C - Oak Hall (Hostel)',
+  'Block A - Pine Hall (Hostel)',
+  'Block B - Maple Hall (Hostel)',
+  'Main Campus Gate (North)',
+  'South Residence Plaza',
+];
+
+const DROP_LOCATIONS = [
+  'Engineering Core (Hall 4)',
+  'Science Concourse (Lab 2)',
+  'Central Academic Quad',
+  'Main Library & Computing Deck',
+  'Campus Health & Sports Pavilion',
+];
+
+const TIME_SLOTS = ['08:30 AM', '10:30 AM', '01:30 PM', '04:30 PM'];
+
+const DURATIONS = [
+  { id: '2w', label: '2 Weeks', days: 14 },
+  { id: '1m', label: '1 Month', days: 30 },
+  { id: 'sem', label: 'Full Semester', days: 120 },
+];
+
+/**
+ * Medical Conditions / Injury Types for Verification
+ */
+const MEDICAL_CONDITIONS = [
+  'Leg/Ankle Fracture',
+  'Ligament Tear / Sprain',
+  'Post-Surgery Recovery',
+  'Chronic Mobility Condition',
+  'Other',
+];
+
+/**
+ * Realistic Initial Seed Requests for localStorage
+ */
+const SEED_REQUESTS = [
+  {
+    id: 'REQ-8492',
+    studentName: 'Pranav Kumar',
+    studentId: 'STU-84920',
+    residencyType: 'Hostler (Block C)',
+    mobile: '+91 98765 43210',
+    route: 'Block C - Oak Hall (Hostel) → Engineering Core (Hall 4)',
+    pickup: 'Block C - Oak Hall (Hostel)',
+    drop: 'Engineering Core (Hall 4)',
+    timeSlots: ['08:30 AM', '04:30 PM'],
+    duration: '1 Month',
+    medicalCondition: 'Leg/Ankle Fracture',
+    reason: 'Fractured right fibula with plaster cast; unable to walk long distances between hostel and campus lecture halls.',
+    certificateName: 'orthopedic_clinic_referral.pdf',
+    certificatePreview: null,
+    certificateSize: '412 KB',
+    status: 'active', // 'active'
+    submittedAt: new Date(Date.now() - 3600000 * 2).toISOString(),
+    submittedTime: 'Today 09:30 AM',
+  },
+  {
+    id: 'REQ-9102',
+    studentName: 'Aarav Sharma',
+    studentId: 'STU-77210',
+    residencyType: 'Hostler (Block B)',
+    mobile: '+91 98450 11223',
+    route: 'Block B - Maple Hall (Hostel) → Engineering Core (Hall 4)',
+    pickup: 'Block B - Maple Hall (Hostel)',
+    drop: 'Engineering Core (Hall 4)',
+    timeSlots: ['08:30 AM', '04:30 PM'],
+    duration: '1 Month',
+    medicalCondition: 'Leg/Ankle Fracture',
+    reason: 'Left tibia hairline fracture in cast, doctor advised complete non-weight bearing for 4 weeks.',
+    certificateName: 'clinic_discharge_aarav.pdf',
+    certificatePreview: null,
+    certificateSize: '340 KB',
+    status: 'active',
+    submittedAt: new Date(Date.now() - 3600000 * 4).toISOString(),
+    submittedTime: 'Today 07:15 AM',
+  },
+  {
+    id: 'REQ-9088',
+    studentName: 'Neha Patel',
+    studentId: 'STU-82194',
+    residencyType: 'Day Scholar',
+    mobile: '+91 97110 55667',
+    route: 'Main Campus Gate (North) → Science Concourse (Lab 2)',
+    pickup: 'Main Campus Gate (North)',
+    drop: 'Science Concourse (Lab 2)',
+    timeSlots: ['10:30 AM', '01:30 PM'],
+    duration: '2 Weeks',
+    medicalCondition: 'Ligament Tear / Sprain',
+    reason: 'Grade 2 ACL sprain from campus athletics, using walking crutches for class commute.',
+    certificateName: 'orthopedic_prescription.jpg',
+    certificatePreview: null,
+    certificateSize: '1.2 MB',
+    status: 'active',
+    submittedAt: new Date(Date.now() - 3600000 * 6).toISOString(),
+    submittedTime: 'Today 05:40 AM',
+  },
+];
+
+/**
+ * Retrieve shared pass requests from localStorage, seeding if empty
+ */
+function getStoredRequests() {
+  if (typeof window === 'undefined') return SEED_REQUESTS;
+  try {
+    const raw = localStorage.getItem('qartix_pass_requests');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+    localStorage.setItem('qartix_pass_requests', JSON.stringify(SEED_REQUESTS));
+    return SEED_REQUESTS;
+  } catch (e) {
+    return SEED_REQUESTS;
+  }
+}
+
+/**
+ * StudentDashboard Component
+ * Features an Interactive Monthly Pass Builder with Medical Verification requirement,
+ * live ticket preview, and Today's Live Ride schedule.
+ */
+export default function StudentDashboard({
+  student = { id: 'STU-84920', fullName: 'Pranav Kumar', hostelBlock: 'Block-C Oak Hall' },
+  onReturnTo3D = () => {},
+  onLogout = () => {},
+}) {
+  const currentStudentId = student?.id || 'STU-84920';
+
+  // -----------------------------------------------------------
+  // 1. SHARED PASS REQUESTS & SYNC STATE
+  // -----------------------------------------------------------
+  const [requestsList, setRequestsList] = useState(getStoredRequests);
+
+  // Sync across tabs & storage events
+  useEffect(() => {
+    const handleStorageChange = () => {
+      setRequestsList(getStoredRequests());
+    };
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
+
+  // Find latest request for the active student
+  const currentRequest = requestsList.find(
+    (r) => r.studentId.toUpperCase() === currentStudentId.toUpperCase()
+  ) || requestsList[0] || null;
+
+  // Pass status: active once submitted / loaded
+  const passStatus = currentRequest ? currentRequest.status : 'active';
+  const isApproved = true; // Always active upon submission in 2-role system
+  const isPending = false;
+  const isRejected = false;
+
+  // -----------------------------------------------------------
+  // 2. PASS BUILDER & MEDICAL FORM STATE
+  // -----------------------------------------------------------
+  const [routeType, setRouteType] = useState('hostel_class'); // 'hostel_class' | 'gate_class'
+  const [pickup, setPickup] = useState(currentRequest?.pickup || PICKUP_LOCATIONS[0]);
+  const [drop, setDrop] = useState(currentRequest?.drop || DROP_LOCATIONS[0]);
+  const [selectedSlots, setSelectedSlots] = useState(currentRequest?.timeSlots || ['08:30 AM', '04:30 PM']);
+  const [duration, setDuration] = useState('1m');
+
+  // Medical Verification Form Fields
+  const [medicalCondition, setMedicalCondition] = useState(
+    currentRequest?.medicalCondition || MEDICAL_CONDITIONS[0]
+  );
+  const [customCondition, setCustomCondition] = useState('');
+  const [reason, setReason] = useState(
+    currentRequest?.reason || 'Unable to walk from hostel to academic block due to cast on right leg.'
+  );
+  const [medicalSlip, setMedicalSlip] = useState(
+    currentRequest
+      ? {
+          name: currentRequest.certificateName || 'orthopedic_clinic_referral.pdf',
+          size: currentRequest.certificateSize || '412 KB',
+          timestamp: currentRequest.submittedTime || 'Today 09:30 AM',
+        }
+      : {
+          name: 'orthopedic_clinic_referral.pdf',
+          size: '412 KB',
+          timestamp: 'Today 09:30 AM',
+        }
+  );
+  const [certificatePreview, setCertificatePreview] = useState(
+    currentRequest?.certificatePreview || null
+  );
+
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [submitSuccessMsg, setSubmitSuccessMsg] = useState('');
+  const [rollKey, setRollKey] = useState(0); // Trigger vertical roll transition
+  const fileInputRef = useRef(null);
+
+  // Trigger vertical roll animation on input change
+  const triggerRoll = () => {
+    setRollKey((prev) => prev + 1);
+  };
+
+  const handleRouteTypeToggle = (type) => {
+    setRouteType(type);
+    if (type === 'hostel_class') {
+      setPickup(PICKUP_LOCATIONS[0]);
+      setDrop(DROP_LOCATIONS[0]);
+    } else {
+      setPickup('Main Campus Gate (North)');
+      setDrop('Central Academic Quad');
+    }
+    triggerRoll();
+  };
+
+  const toggleSlot = (slot) => {
+    setSelectedSlots((prev) => {
+      const exists = prev.includes(slot);
+      const next = exists ? prev.filter((s) => s !== slot) : [...prev, slot];
+      return next.length > 0 ? next : [slot];
+    });
+    triggerRoll();
+  };
+
+  const handleDurationSelect = (durId) => {
+    setDuration(durId);
+    triggerRoll();
+  };
+
+  const handleFileUpload = (file) => {
+    if (!file) return;
+
+    // Check if image for preview
+    if (file.type && file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        setCertificatePreview(e.target.result);
+      };
+      reader.readAsDataURL(file);
+    } else {
+      setCertificatePreview(null);
+    }
+
+    setMedicalSlip({
+      name: file.name,
+      size: `${(file.size / 1024).toFixed(1)} KB`,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    });
+    if (formError) setFormError('');
+    triggerRoll();
+  };
+
+  const durationObj = DURATIONS.find((d) => d.id === duration) || DURATIONS[1];
+
+  // Submit for Verification
+  const handleSubmitVerification = (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+
+    if (!medicalCondition) {
+      setFormError('Please select your medical condition or injury type.');
+      return;
+    }
+    if (!reason.trim()) {
+      setFormError('Please specify the reason for your monthly mobility pass.');
+      return;
+    }
+    if (!medicalSlip) {
+      setFormError('Please upload a valid medical certificate or clinic slip (.pdf, .jpg, .png).');
+      return;
+    }
+
+    const finalCondition =
+      medicalCondition === 'Other' && customCondition.trim() ? customCondition.trim() : medicalCondition;
+
+    const newApplication = {
+      id: `REQ-${Date.now().toString().slice(-4)}`,
+      studentName: student.fullName || 'Student User',
+      studentId: currentStudentId,
+      residencyType: student.residencyStatus || student.hostelBlock || 'Hostler',
+      mobile: student.phone || '+91 98765 43210',
+      route: `${pickup} → ${drop}`,
+      pickup,
+      drop,
+      timeSlots: selectedSlots,
+      duration: durationObj.label,
+      medicalCondition: finalCondition,
+      reason: reason.trim(),
+      certificateName: medicalSlip.name,
+      certificatePreview: certificatePreview || null,
+      certificateSize: medicalSlip.size,
+      status: 'active',
+      submittedAt: new Date().toISOString(),
+      submittedTime: 'Today ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+
+    try {
+      const existing = getStoredRequests();
+      const updated = [
+        newApplication,
+        ...existing.filter((r) => r.studentId.toUpperCase() !== currentStudentId.toUpperCase()),
+      ];
+      localStorage.setItem('qartix_pass_requests', JSON.stringify(updated));
+      setRequestsList(updated);
+    } catch (err) {
+      console.error('Failed to save pass request to localStorage', err);
+    }
+
+    setFormError('');
+    setSubmitSuccessMsg(`Pass submitted & active! Transport office notified. Request ID: ${newApplication.id}.`);
+    triggerRoll();
+    setTimeout(() => setSubmitSuccessMsg(''), 7000);
+  };
+
+  // -----------------------------------------------------------
+  // 3. TODAY'S SCHEDULE & RIDES STATE
+  // -----------------------------------------------------------
+  const [rides, setRides] = useState([
+    {
+      id: 'ride-1',
+      time: '08:30 AM',
+      route: 'Block C - Oak Hall → Engineering Core',
+      status: 'APPROACHING • 4 MINS',
+      skipped: false,
+    },
+    {
+      id: 'ride-2',
+      time: '01:30 PM',
+      route: 'Engineering Core → Central Academic Quad',
+      status: 'SCHEDULED',
+      skipped: false,
+    },
+    {
+      id: 'ride-3',
+      time: '04:30 PM',
+      route: 'Main Library Deck → Block C - Oak Hall',
+      status: 'SCHEDULED',
+      skipped: false,
+    },
+  ]);
+
+  const [extraRideModalOpen, setExtraRideModalOpen] = useState(false);
+  const [extraDestination, setExtraDestination] = useState('Campus Health Clinic (Urgent)');
+  const [extraConfirmed, setExtraConfirmed] = useState(false);
+
+  const toggleSkipRide = (rideId) => {
+    setRides((prev) =>
+      prev.map((r) => (r.id === rideId ? { ...r, skipped: !r.skipped } : r))
+    );
+  };
+
+  const handleRequestExtraRide = () => {
+    setExtraConfirmed(true);
+    setTimeout(() => {
+      setExtraConfirmed(false);
+      setExtraRideModalOpen(false);
+      setRides((prev) => [
+        {
+          id: `ride-extra-${Date.now()}`,
+          time: 'IMMEDIATE',
+          route: `Current Station → ${extraDestination}`,
+          status: 'PRIORITY DISPATCH • 2 MINS',
+          skipped: false,
+        },
+        ...prev,
+      ]);
+    }, 1200);
+  };
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        backgroundColor: '#13161B',
+        backgroundImage: 'radial-gradient(circle at 60% 45%, #242A34 0%, #13161B 70%)',
+        color: '#F4F5F7',
+        fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
+        paddingBottom: '80px',
+      }}
+    >
+      {/* Inline Keyframe Styles for Vertical Roll & Stamp Slam */}
+      <style>{`
+        @keyframes verticalRoll {
+          0% {
+            transform: translateY(-12px) scale(0.98);
+            opacity: 0.35;
+          }
+          100% {
+            transform: translateY(0px) scale(1);
+            opacity: 1;
+          }
+        }
+        @keyframes stampSlam {
+          0% {
+            transform: scale(2.4) rotate(-18deg);
+            opacity: 0;
+          }
+          60% {
+            transform: scale(0.92) rotate(-3deg);
+            opacity: 1;
+          }
+          100% {
+            transform: scale(1) rotate(-4deg);
+            opacity: 1;
+          }
+        }
+        @keyframes pulseTrack {
+          0% { width: 62%; }
+          50% { width: 75%; }
+          100% { width: 62%; }
+        }
+      `}</style>
+
+      {/* -------------------------------------------------------- */}
+      {/* TOP NAVIGATION BAR IN DARK SLATE                         */}
+      {/* -------------------------------------------------------- */}
+      <header
+        style={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 50,
+          height: '68px',
+          padding: '0 32px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          background: 'rgba(28, 33, 40, 0.88)',
+          backdropFilter: 'blur(16px)',
+          WebkitBackdropFilter: 'blur(16px)',
+          borderBottom: '1px solid rgba(255, 255, 255, 0.12)',
+        }}
+      >
+        {/* Brand & Student Badge */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }} onClick={onReturnTo3D}>
+            <div
+              style={{
+                width: '34px',
+                height: '34px',
+                borderRadius: '8px',
+                background: '#13161B',
+                border: '1px solid rgba(255, 255, 255, 0.12)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: '2px 2px 0px #0D1013',
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F4F5F7" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="8" />
+                <path d="m15.5 15.5 3.5 3.5" />
+                <path d="M9 12h6" />
+              </svg>
+            </div>
+            <div>
+              <div style={{ fontSize: '15px', fontWeight: 900, letterSpacing: '0.1em', lineHeight: 1.1, color: '#F4F5F7' }}>QARTIX</div>
+              <div style={{ fontSize: '9px', fontWeight: 700, color: '#9CA3AF', letterSpacing: '0.14em' }}>STUDENT PORTAL</div>
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '6px 14px',
+              background: '#13161B',
+              border: '1px solid rgba(255, 255, 255, 0.12)',
+              boxShadow: '2px 2px 0px #0D1013',
+              borderRadius: '8px',
+              fontSize: '11px',
+              fontWeight: 700,
+            }}
+          >
+            <span
+              style={{
+                width: '7px',
+                height: '7px',
+                borderRadius: '50%',
+                background: isApproved ? '#10B981' : isPending ? '#F59E0B' : '#EF4444',
+                boxShadow: isApproved ? '0 0 6px #10B981' : isPending ? '0 0 6px #F59E0B' : '0 0 6px #EF4444',
+              }}
+            />
+            <span style={{ color: '#9CA3AF' }}>ID:</span>
+            <span style={{ fontFamily: 'monospace', fontWeight: 800, color: '#F4F5F7' }}>{student.id || 'STU-84920'}</span>
+          </div>
+        </div>
+
+        {/* View Switchers & Log Out */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <button
+            type="button"
+            onClick={onReturnTo3D}
+            style={{
+              padding: '8px 16px',
+              background: '#1C2128',
+              color: '#F4F5F7',
+              border: '1px solid rgba(255, 255, 255, 0.12)',
+              boxShadow: '2px 2px 0px #0D1013',
+              borderRadius: '8px',
+              fontSize: '11px',
+              fontWeight: 700,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <span>← 3D Cart Experience</span>
+          </button>
+
+          <button
+            type="button"
+            style={{
+              padding: '8px 16px',
+              background: '#10B981',
+              color: '#0B1116',
+              border: '1px solid #10B981',
+              boxShadow: '0 4px 14px rgba(16, 185, 129, 0.25), 2px 2px 0px #0D1013',
+              borderRadius: '8px',
+              fontSize: '11px',
+              fontWeight: 900,
+              cursor: 'default',
+            }}
+          >
+            Pass & Rides
+          </button>
+
+          <button
+            type="button"
+            onClick={onLogout}
+            style={{
+              padding: '8px 14px',
+              background: 'transparent',
+              color: '#9CA3AF',
+              border: '1px solid rgba(255, 255, 255, 0.12)',
+              borderRadius: '8px',
+              fontSize: '11px',
+              fontWeight: 700,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            Log Out
+          </button>
+        </div>
+      </header>
+
+      {/* -------------------------------------------------------- */}
+      {/* MAIN CONTAINER                                           */}
+      {/* -------------------------------------------------------- */}
+      <main style={{ maxWidth: '1200px', margin: '36px auto', padding: '0 24px', display: 'flex', flexDirection: 'column', gap: '36px' }}>
+        
+        {/* ======================================================= */}
+        {/* SECTION 2: LIVE RIDE & TODAY'S SCHEDULE (TOP DECK)     */}
+        {/* ======================================================= */}
+        <section style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+
+          {/* STATUS NOTIFICATION BANNER */}
+          <div
+            style={{
+              background: 'rgba(16, 185, 129, 0.08)',
+              border: '1px solid rgba(16, 185, 129, 0.3)',
+              borderLeft: '5px solid #10B981',
+              boxShadow: '0 4px 16px rgba(0, 0, 0, 0.25)',
+              borderRadius: '12px',
+              padding: '18px 24px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '12px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                <div
+                  style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '50%',
+                    background: 'rgba(16, 185, 129, 0.15)',
+                    border: '1px solid #10B981',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: '#10B981',
+                    flexShrink: 0,
+                  }}
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20 6 9 17l-5-5" />
+                  </svg>
+                </div>
+
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <h3 style={{ fontSize: '15px', fontWeight: 800, margin: 0, color: '#F4F5F7' }}>
+                      Monthly Pass Active • Medical Record Notified ({currentRequest?.id || 'REQ-8492'})
+                    </h3>
+                    <span
+                      style={{
+                        padding: '2px 8px',
+                        borderRadius: '12px',
+                        fontSize: '10px',
+                        fontWeight: 900,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.04em',
+                        background: 'rgba(16, 185, 129, 0.2)',
+                        color: '#10B981',
+                        border: '1px solid rgba(16, 185, 129, 0.4)',
+                      }}
+                    >
+                      ACTIVE
+                    </span>
+                  </div>
+
+                  <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#9CA3AF', lineHeight: 1.4 }}>
+                    Your campus medical mobility pass is active. Medical documentation has been recorded and the campus transport office notified. Scheduled rides and live cart tracking are unlocked.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Top Status Card: Cart #04 • 4 Mins Away */}
+          <div
+            style={{
+              position: 'relative',
+              background: '#1C2128',
+              border: '1px solid rgba(255, 255, 255, 0.12)',
+              boxShadow: '4px 4px 0px #0D1013',
+              borderRadius: '12px',
+              padding: '24px 28px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '16px',
+              overflow: 'hidden',
+            }}
+          >
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <span
+                  style={{
+                    width: '10px',
+                    height: '10px',
+                    borderRadius: '50%',
+                    background: '#10B981',
+                    boxShadow: '0 0 10px #10B981',
+                  }}
+                />
+                <h2 style={{ fontSize: '20px', fontWeight: 900, margin: 0, letterSpacing: '0.04em', color: '#F4F5F7' }}>
+                  CART #04 • 4 MINS AWAY
+                </h2>
+                <span
+                  style={{
+                    padding: '3px 8px',
+                    background: '#13161B',
+                    border: '1px solid rgba(255, 255, 255, 0.12)',
+                    borderRadius: '4px',
+                    fontSize: '10px',
+                    fontWeight: 800,
+                    fontFamily: 'monospace',
+                    color: '#F4F5F7',
+                  }}
+                >
+                  ROUTE 01 ACTIVE
+                </span>
+              </div>
+
+              <div style={{ fontSize: '12px', fontWeight: 600, color: '#9CA3AF' }}>
+                Approaching: <strong style={{ color: '#F4F5F7' }}>Science Concourse Station</strong> • Speed: <strong style={{ color: '#F4F5F7' }}>14 km/h</strong>
+              </div>
+            </div>
+
+            {/* Horizontal Transit Progress Bar */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <div
+                style={{
+                  width: '100%',
+                  height: '14px',
+                  background: '#13161B',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  borderRadius: '7px',
+                  overflow: 'hidden',
+                  position: 'relative',
+                }}
+              >
+                <div
+                  style={{
+                    height: '100%',
+                    background: '#242A34',
+                    borderRight: '2px solid #10B981',
+                    borderRadius: '5px',
+                    animation: isApproved ? 'pulseTrack 4s ease-in-out infinite' : 'none',
+                    width: isApproved ? '68%' : '20%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'flex-end',
+                    paddingRight: '4px',
+                  }}
+                >
+                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#10B981' }} />
+                </div>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', fontWeight: 700, color: '#9CA3AF' }}>
+                <span>Departed Central Quad</span>
+                <span style={{ color: '#10B981' }}>● En Route to Pickup</span>
+                <span>Destination Core</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Today's Scheduled Rides List */}
+          <div
+            style={{
+              position: 'relative',
+              background: '#1C2128',
+              border: '1px solid rgba(255, 255, 255, 0.12)',
+              boxShadow: '4px 4px 0px #0D1013',
+              borderRadius: '12px',
+              padding: '24px 28px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '16px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <h3 style={{ fontSize: '16px', fontWeight: 900, margin: 0, color: '#F4F5F7' }}>Today's Scheduled Rides</h3>
+                </div>
+                <div style={{ fontSize: '12px', color: '#9CA3AF', marginTop: '2px' }}>
+                  Automatic dispatch reservations linked to your active campus pass
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setExtraRideModalOpen(true)}
+                style={{
+                  padding: '9px 18px',
+                  background: '#10B981',
+                  color: '#0B1116',
+                  border: '1px solid #10B981',
+                  boxShadow: '0 4px 14px rgba(16, 185, 129, 0.25), 3px 3px 0px #0D1013',
+                  borderRadius: '8px',
+                  fontSize: '11px',
+                  fontWeight: 900,
+                  letterSpacing: '0.04em',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  transition: 'all 0.15s ease',
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 5v14" />
+                  <path d="M5 12h14" />
+                </svg>
+                <span>Request Extra Ride</span>
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {rides.map((r) => (
+                <div
+                  key={r.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '14px 20px',
+                    borderRadius: '8px',
+                    border: '1px solid rgba(255, 255, 255, 0.12)',
+                    background: '#13161B',
+                    opacity: r.skipped ? 0.45 : 1.0,
+                    transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+                    {/* Timestamp with strikethrough animation when skipped */}
+                    <div
+                      style={{
+                        fontSize: '15px',
+                        fontWeight: 800,
+                        fontFamily: 'monospace',
+                        color: '#F4F5F7',
+                        minWidth: '90px',
+                        textDecoration: r.skipped ? 'line-through' : 'none',
+                        textDecorationColor: '#10B981',
+                        textDecorationThickness: '2px',
+                        transition: 'all 0.2s ease',
+                      }}
+                    >
+                      {r.time}
+                    </div>
+
+                    <div>
+                      <div style={{ fontSize: '13px', fontWeight: 700, color: '#F4F5F7' }}>
+                        {r.route}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: '11px',
+                          fontWeight: 600,
+                          color: r.skipped ? '#9CA3AF' : '#10B981',
+                          marginTop: '2px',
+                        }}
+                      >
+                        {r.skipped ? '● SKIPPED FOR TODAY' : r.status}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Skip Today Toggle Button */}
+                  <button
+                    type="button"
+                    onClick={() => toggleSkipRide(r.id)}
+                    style={{
+                      padding: '6px 14px',
+                      borderRadius: '6px',
+                      border: '1px solid rgba(255, 255, 255, 0.12)',
+                      background: r.skipped ? '#10B981' : '#1C2128',
+                      color: r.skipped ? '#0B1116' : '#FFFFFF',
+                      boxShadow: r.skipped ? '0 2px 8px rgba(16, 185, 129, 0.3)' : '2px 2px 0px #0D1013',
+                      fontSize: '11px',
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    {r.skipped ? 'Reactivate Ride' : 'Skip Today'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* ======================================================= */}
+        {/* SECTION 1: INTERACTIVE MONTHLY PASS BUILDER             */}
+        {/* ======================================================= */}
+        <section id="pass-builder-section">
+          <div style={{ marginBottom: '16px' }}>
+            <span style={{ fontSize: '10px', fontWeight: 800, letterSpacing: '0.12em', color: '#10B981', textTransform: 'uppercase' }}>
+              STEP 1 • MEDICAL MOBILITY VERIFICATION
+            </span>
+            <h2 style={{ fontSize: '24px', fontWeight: 900, margin: '4px 0 0 0', letterSpacing: '-0.01em', color: '#F4F5F7' }}>
+              Interactive Monthly Pass Builder
+            </h2>
+            <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#9CA3AF' }}>
+              Submit your medical details and certificate for campus mobility verification to activate your monthly electric cart pass.
+            </p>
+          </div>
+
+          {/* Split Card: Left Medical Verification Form / Right Live Digital Boarding Pass */}
+          <div
+            style={{
+              background: '#1C2128',
+              border: '1px solid rgba(255, 255, 255, 0.12)',
+              boxShadow: '4px 4px 0px #0D1013',
+              borderRadius: '12px',
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))',
+              overflow: 'hidden',
+            }}
+          >
+            {/* ---------------------------------------------------- */}
+            {/* LEFT: MEDICAL VERIFICATION FORM                      */}
+            {/* ---------------------------------------------------- */}
+            <form
+              onSubmit={handleSubmitVerification}
+              style={{
+                padding: '32px',
+                borderRight: '1px solid rgba(255, 255, 255, 0.12)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '22px',
+                background: '#1C2128',
+              }}
+            >
+              {/* Medical Notice Pill */}
+              <div
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: '8px',
+                  background: 'rgba(16, 185, 129, 0.08)',
+                  border: '1px solid rgba(16, 185, 129, 0.25)',
+                  fontSize: '11px',
+                  color: '#A7F3D0',
+                  lineHeight: 1.4,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                }}
+              >
+                <span style={{ fontSize: '14px' }}>📋</span>
+                <span>
+                  <strong>Campus Policy:</strong> Monthly passes are prioritized for students with medical injuries, post-surgery recovery, or chronic mobility needs.
+                </span>
+              </div>
+
+              {/* 1. Medical Condition / Injury Type */}
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '6px', color: '#9CA3AF' }}>
+                  Medical Condition / Injury Type <span style={{ color: '#10B981' }}>*</span>
+                </label>
+                <select
+                  value={medicalCondition}
+                  onChange={(e) => {
+                    setMedicalCondition(e.target.value);
+                    triggerRoll();
+                  }}
+                  style={{
+                    width: '100%',
+                    padding: '10px 12px',
+                    borderRadius: '8px',
+                    border: '1px solid rgba(255, 255, 255, 0.15)',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    background: '#13161B',
+                    color: '#F4F5F7',
+                    outline: 'none',
+                  }}
+                >
+                  {MEDICAL_CONDITIONS.map((cond) => (
+                    <option key={cond} value={cond} style={{ background: '#13161B', color: '#F4F5F7' }}>
+                      {cond}
+                    </option>
+                  ))}
+                </select>
+
+                {medicalCondition === 'Other' && (
+                  <input
+                    type="text"
+                    placeholder="Specify condition / mobility injury..."
+                    value={customCondition}
+                    onChange={(e) => {
+                      setCustomCondition(e.target.value);
+                      triggerRoll();
+                    }}
+                    style={{
+                      marginTop: '8px',
+                      width: '100%',
+                      padding: '10px 12px',
+                      borderRadius: '8px',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      fontSize: '12px',
+                      background: '#13161B',
+                      color: '#F4F5F7',
+                      outline: 'none',
+                    }}
+                  />
+                )}
+              </div>
+
+              {/* 2. Reason for Monthly Pass Textarea */}
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '6px', color: '#9CA3AF' }}>
+                  Reason for Monthly Pass Request <span style={{ color: '#10B981' }}>*</span>
+                </label>
+                <textarea
+                  rows={3}
+                  value={reason}
+                  onChange={(e) => {
+                    setReason(e.target.value);
+                    triggerRoll();
+                  }}
+                  placeholder="Unable to walk from hostel to academic block due to cast on right leg..."
+                  style={{
+                    width: '100%',
+                    padding: '10px 12px',
+                    borderRadius: '8px',
+                    border: '1px solid rgba(255, 255, 255, 0.15)',
+                    fontSize: '12px',
+                    background: '#13161B',
+                    color: '#F4F5F7',
+                    resize: 'vertical',
+                    outline: 'none',
+                    lineHeight: 1.4,
+                  }}
+                />
+                <span style={{ fontSize: '10px', color: '#9CA3AF', marginTop: '2px', display: 'block' }}>
+                  Describe your mobility restrictions and commute challenges across campus.
+                </span>
+              </div>
+
+              {/* 3. Medical Certificate Upload with Drag & Drop + Image Thumbnail */}
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '6px', color: '#9CA3AF' }}>
+                  Upload Medical Certificate / Clinic Slip <span style={{ color: '#10B981' }}>*</span>
+                </label>
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDraggingFile(true);
+                  }}
+                  onDragLeave={() => setIsDraggingFile(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsDraggingFile(false);
+                    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                      handleFileUpload(e.dataTransfer.files[0]);
+                    }
+                  }}
+                  onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                  style={{
+                    border: isDraggingFile ? '2px dashed #10B981' : '1.5px dashed rgba(255, 255, 255, 0.25)',
+                    background: isDraggingFile ? 'rgba(16, 185, 129, 0.1)' : medicalSlip ? 'rgba(16, 185, 129, 0.06)' : '#13161B',
+                    borderRadius: '8px',
+                    padding: '14px',
+                    textAlign: 'center',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s ease',
+                  }}
+                >
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    style={{ display: 'none' }}
+                    accept=".pdf,.jpg,.jpeg,.png,image/*"
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) {
+                        handleFileUpload(e.target.files[0]);
+                      }
+                    }}
+                  />
+                  {medicalSlip ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ color: '#10B981', fontWeight: 900, fontSize: '13px' }}>✓ Attached:</span>
+                        <span style={{ fontSize: '12px', fontWeight: 700, fontFamily: 'monospace', color: '#F4F5F7' }}>{medicalSlip.name}</span>
+                        <span style={{ fontSize: '10px', color: '#9CA3AF' }}>({medicalSlip.size})</span>
+                      </div>
+                      {certificatePreview && (
+                        <div style={{ marginTop: '4px' }}>
+                          <img
+                            src={certificatePreview}
+                            alt="Certificate Preview"
+                            style={{
+                              maxHeight: '60px',
+                              borderRadius: '4px',
+                              border: '1px solid rgba(255, 255, 255, 0.2)',
+                              objectFit: 'contain',
+                            }}
+                          />
+                        </div>
+                      )}
+                      <span style={{ fontSize: '10px', color: '#10B981', textDecoration: 'underline' }}>
+                        Click to change or replace file
+                      </span>
+                    </div>
+                  ) : (
+                    <div>
+                      <div style={{ fontSize: '12px', fontWeight: 700, color: '#F4F5F7' }}>
+                        Drop doctor slip / OPD prescription (.pdf, .jpg, .png), or <span style={{ color: '#10B981', textDecoration: 'underline' }}>browse</span>
+                      </div>
+                      <div style={{ fontSize: '10px', color: '#9CA3AF', marginTop: '4px' }}>
+                        Required for campus mobility verification
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* 4. Route Trajectory Template Toggle */}
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '8px', color: '#9CA3AF' }}>
+                  Route Trajectory Template
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px', padding: '4px', background: '#13161B', border: '1px solid rgba(255, 255, 255, 0.12)', borderRadius: '8px' }}>
+                  <button
+                    type="button"
+                    onClick={() => handleRouteTypeToggle('hostel_class')}
+                    style={{
+                      padding: '8px 12px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      background: routeType === 'hostel_class' ? '#1C2128' : 'transparent',
+                      color: routeType === 'hostel_class' ? '#F4F5F7' : '#9CA3AF',
+                      boxShadow: routeType === 'hostel_class' ? '0 1px 4px rgba(0,0,0,0.3)' : 'none',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    Hostel → Class
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleRouteTypeToggle('gate_class')}
+                    style={{
+                      padding: '8px 12px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      background: routeType === 'gate_class' ? '#1C2128' : 'transparent',
+                      color: routeType === 'gate_class' ? '#F4F5F7' : '#9CA3AF',
+                      boxShadow: routeType === 'gate_class' ? '0 1px 4px rgba(0,0,0,0.3)' : 'none',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    Main Gate → Class
+                  </button>
+                </div>
+              </div>
+
+              {/* 5. Pickup & Drop Selectors */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '6px', color: '#9CA3AF' }}>
+                    Pickup Station
+                  </label>
+                  <select
+                    value={pickup}
+                    onChange={(e) => {
+                      setPickup(e.target.value);
+                      triggerRoll();
+                    }}
+                    style={{
+                      width: '100%',
+                      padding: '10px 12px',
+                      borderRadius: '8px',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      background: '#13161B',
+                      color: '#F4F5F7',
+                      outline: 'none',
+                    }}
+                  >
+                    {PICKUP_LOCATIONS.map((loc) => (
+                      <option key={loc} value={loc} style={{ background: '#13161B', color: '#F4F5F7' }}>
+                        {loc}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '6px', color: '#9CA3AF' }}>
+                    Drop Station
+                  </label>
+                  <select
+                    value={drop}
+                    onChange={(e) => {
+                      setDrop(e.target.value);
+                      triggerRoll();
+                    }}
+                    style={{
+                      width: '100%',
+                      padding: '10px 12px',
+                      borderRadius: '8px',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      background: '#13161B',
+                      color: '#F4F5F7',
+                      outline: 'none',
+                    }}
+                  >
+                    {DROP_LOCATIONS.map((loc) => (
+                      <option key={loc} value={loc} style={{ background: '#13161B', color: '#F4F5F7' }}>
+                        {loc}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* 6. Time-Slot Pill Chips */}
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '8px', color: '#9CA3AF' }}>
+                  Daily Scheduled Time Slots
+                </label>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {TIME_SLOTS.map((slot) => {
+                    const isSelected = selectedSlots.includes(slot);
+                    return (
+                      <button
+                        key={slot}
+                        type="button"
+                        onClick={() => toggleSlot(slot)}
+                        style={{
+                          padding: '7px 14px',
+                          borderRadius: '20px',
+                          border: isSelected ? '1px solid #10B981' : '1px solid rgba(255, 255, 255, 0.12)',
+                          background: isSelected ? '#10B981' : '#13161B',
+                          color: isSelected ? '#0B1116' : '#9CA3AF',
+                          boxShadow: isSelected ? '0 2px 8px rgba(16, 185, 129, 0.3), 2px 2px 0px #0D1013' : 'none',
+                          fontSize: '11px',
+                          fontWeight: isSelected ? 900 : 700,
+                          cursor: 'pointer',
+                          transition: 'all 0.15s ease',
+                        }}
+                      >
+                        {slot}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 7. Duration Selector */}
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '8px', color: '#9CA3AF' }}>
+                  Pass Validity Duration
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+                  {DURATIONS.map((dur) => {
+                    const isSelected = duration === dur.id;
+                    return (
+                      <button
+                        key={dur.id}
+                        type="button"
+                        onClick={() => handleDurationSelect(dur.id)}
+                        style={{
+                          padding: '10px 8px',
+                          borderRadius: '8px',
+                          border: isSelected ? '1px solid #10B981' : '1px solid rgba(255, 255, 255, 0.12)',
+                          background: isSelected ? '#13161B' : '#1C2128',
+                          boxShadow: isSelected ? '2px 2px 0px #10B981' : 'none',
+                          color: isSelected ? '#F4F5F7' : '#9CA3AF',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: 'center',
+                          gap: '2px',
+                          transition: 'all 0.15s ease',
+                        }}
+                      >
+                        <span style={{ fontSize: '12px', fontWeight: 800 }}>{dur.label}</span>
+                        <span style={{ fontSize: '9px', fontWeight: 600, color: '#9CA3AF' }}>{dur.days} Days Access</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Validation Error Message */}
+              {formError && (
+                <div
+                  style={{
+                    padding: '10px 14px',
+                    background: 'rgba(239, 68, 68, 0.12)',
+                    border: '1px solid #EF4444',
+                    borderRadius: '8px',
+                    color: '#F87171',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                  }}
+                >
+                  ⚠️ {formError}
+                </div>
+              )}
+
+              {/* Success Message */}
+              {submitSuccessMsg && (
+                <div
+                  style={{
+                    padding: '10px 14px',
+                    background: 'rgba(16, 185, 129, 0.12)',
+                    border: '1px solid #10B981',
+                    borderRadius: '8px',
+                    color: '#6EE7B7',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                  }}
+                >
+                  ✓ {submitSuccessMsg}
+                </div>
+              )}
+
+              {/* Submit for Verification Button */}
+              <button
+                type="submit"
+                style={{
+                  marginTop: '8px',
+                  padding: '14px 20px',
+                  background: '#10B981',
+                  color: '#0B1116',
+                  border: '1px solid #10B981',
+                  boxShadow: '0 4px 16px rgba(16, 185, 129, 0.3), 3px 3px 0px #0D1013',
+                  borderRadius: '8px',
+                  fontSize: '13px',
+                  fontWeight: 900,
+                  letterSpacing: '0.04em',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  transition: 'all 0.15s ease',
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = '#34D399';
+                  e.currentTarget.style.boxShadow = '0 6px 20px rgba(16, 185, 129, 0.45), 3px 3px 0px #0D1013';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = '#10B981';
+                  e.currentTarget.style.boxShadow = '0 4px 16px rgba(16, 185, 129, 0.3), 3px 3px 0px #0D1013';
+                }}
+              >
+                <span>Submit for Verification →</span>
+              </button>
+            </form>
+
+            {/* ---------------------------------------------------- */}
+            {/* RIGHT: LIVE DIGITAL BOARDING PASS                    */}
+            {/* ---------------------------------------------------- */}
+            <div
+              style={{
+                padding: '36px 32px',
+                background: '#13161B',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              {/* Ticket Shape with Semicircle Side Notches */}
+              <div
+                key={rollKey}
+                style={{
+                  width: '100%',
+                  maxWidth: '380px',
+                  background: '#1C2128',
+                  border: '1.5px solid rgba(255, 255, 255, 0.2)',
+                  boxShadow: '4px 4px 0px #0D1013',
+                  borderRadius: '16px',
+                  position: 'relative',
+                  overflow: 'hidden',
+                  animation: 'verticalRoll 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+                  fontFamily: '"IBM Plex Mono", monospace, monospace',
+                }}
+              >
+                {/* Semicircle Side Notches */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: '68%',
+                    left: '-12px',
+                    width: '22px',
+                    height: '22px',
+                    borderRadius: '50%',
+                    background: '#13161B',
+                    border: '1.5px solid rgba(255, 255, 255, 0.2)',
+                    zIndex: 10,
+                  }}
+                />
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: '68%',
+                    right: '-12px',
+                    width: '22px',
+                    height: '22px',
+                    borderRadius: '50%',
+                    background: '#13161B',
+                    border: '1.5px solid rgba(255, 255, 255, 0.2)',
+                    zIndex: 10,
+                  }}
+                />
+
+                {/* Ticket Top Header with Live Pass Status Badge */}
+                <div
+                  style={{
+                    padding: '16px 20px',
+                    background: '#13161B',
+                    color: '#F4F5F7',
+                    borderBottom: '1px solid rgba(255, 255, 255, 0.12)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div
+                      style={{
+                        width: '8px',
+                        height: '8px',
+                        borderRadius: '50%',
+                        background: isApproved ? '#10B981' : isPending ? '#F59E0B' : '#EF4444',
+                        boxShadow: isApproved
+                          ? '0 0 8px #10B981'
+                          : isPending
+                          ? '0 0 8px #F59E0B'
+                          : '0 0 8px #EF4444',
+                      }}
+                    />
+                    <span style={{ fontSize: '13px', fontWeight: 800, letterSpacing: '0.1em' }}>QARTIX PASS</span>
+                  </div>
+
+                  <span
+                    style={{
+                      padding: '3px 8px',
+                      borderRadius: '4px',
+                      fontSize: '9px',
+                      fontWeight: 800,
+                      letterSpacing: '0.06em',
+                      textTransform: 'uppercase',
+                      background: 'rgba(16, 185, 129, 0.2)',
+                      color: '#10B981',
+                      border: '1px solid rgba(16, 185, 129, 0.4)',
+                    }}
+                  >
+                    PASS SUBMITTED • TRANSPORT OFFICE NOTIFIED
+                  </span>
+                </div>
+
+                {/* Ticket Body: IBM Plex Mono Route Metadata & Stamp */}
+                <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px', position: 'relative' }}>
+                  {/* Status-Aligned Ink Stamp Slam Animation */}
+                  <div
+                    key={`stamp-${rollKey}`}
+                    style={{
+                      position: 'absolute',
+                      top: '42%',
+                      left: '50%',
+                      transform: 'translate(-50%, -50%) rotate(-4deg)',
+                      border: '3px double #10B981',
+                      borderRadius: '8px',
+                      padding: '6px 14px',
+                      color: '#10B981',
+                      textAlign: 'center',
+                      zIndex: 20,
+                      background: 'rgba(28, 33, 40, 0.95)',
+                      boxShadow: '0 4px 16px rgba(16, 185, 129, 0.4)',
+                      animation: 'stampSlam 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+                      pointerEvents: 'none',
+                    }}
+                  >
+                    <div style={{ fontSize: '12px', fontWeight: 900, letterSpacing: '0.1em' }}>
+                      PASS SUBMITTED • RECORD FILED
+                    </div>
+                    <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.08em' }}>
+                      TRANSPORT OFFICE NOTIFIED • ACTIVE ACCESS
+                    </div>
+                  </div>
+
+                  {/* Route Trajectory */}
+                  <div>
+                    <div style={{ fontSize: '10px', color: '#9CA3AF', fontWeight: 700, textTransform: 'uppercase' }}>
+                      ROUTE TRAJECTORY
+                    </div>
+                    <div style={{ fontSize: '13px', fontWeight: 800, color: '#F4F5F7', marginTop: '2px', lineHeight: 1.3 }}>
+                      {pickup}
+                    </div>
+                    <div style={{ fontSize: '11px', fontWeight: 800, color: '#10B981', margin: '2px 0' }}>
+                      ↓ VIA CAMPUS ELECTRIC LOOP
+                    </div>
+                    <div style={{ fontSize: '13px', fontWeight: 800, color: '#F4F5F7', lineHeight: 1.3 }}>
+                      {drop}
+                    </div>
+                  </div>
+
+                  {/* Student & Pass IDs */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', paddingTop: '8px', borderTop: '1px dashed rgba(255, 255, 255, 0.15)' }}>
+                    <div>
+                      <div style={{ fontSize: '9px', color: '#9CA3AF', fontWeight: 700 }}>STUDENT</div>
+                      <div style={{ fontSize: '12px', fontWeight: 800, color: '#F4F5F7' }}>{student.fullName || 'Pranav Kumar'}</div>
+                      <div style={{ fontSize: '10px', color: '#9CA3AF' }}>{currentStudentId}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: '9px', color: '#9CA3AF', fontWeight: 700 }}>VALIDITY</div>
+                      <div style={{ fontSize: '12px', fontWeight: 800, color: '#F4F5F7' }}>{durationObj.label}</div>
+                      <div style={{ fontSize: '10px', color: '#9CA3AF' }}>{durationObj.days} Days</div>
+                    </div>
+                  </div>
+
+                  {/* Medical Condition & Attachment Summary */}
+                  <div style={{ paddingTop: '8px', borderTop: '1px dashed rgba(255, 255, 255, 0.15)' }}>
+                    <div style={{ fontSize: '9px', color: '#9CA3AF', fontWeight: 700, marginBottom: '2px' }}>
+                      MEDICAL VERIFICATION DETAILS
+                    </div>
+                    <div style={{ fontSize: '11px', fontWeight: 700, color: '#F4F5F7' }}>
+                      ● {medicalCondition === 'Other' && customCondition ? customCondition : medicalCondition}
+                    </div>
+                    <div style={{ fontSize: '10px', color: '#9CA3AF', marginTop: '2px', fontStyle: 'italic', lineHeight: 1.3 }}>
+                      "{reason.length > 60 ? reason.slice(0, 60) + '...' : reason}"
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px', fontSize: '10px', color: '#10B981' }}>
+                      <span>📎 Doc:</span>
+                      <span style={{ fontFamily: 'monospace', color: '#F4F5F7' }}>{medicalSlip ? medicalSlip.name : 'clinic_slip.pdf'}</span>
+                    </div>
+                  </div>
+
+                  {/* Scheduled Slots */}
+                  <div style={{ paddingTop: '8px', borderTop: '1px dashed rgba(255, 255, 255, 0.15)' }}>
+                    <div style={{ fontSize: '9px', color: '#9CA3AF', fontWeight: 700, marginBottom: '4px' }}>
+                      AUTHORIZED DISPATCH WINDOWS
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                      {selectedSlots.map((s) => (
+                        <span key={s} style={{ padding: '2px 6px', background: '#13161B', border: '1px solid rgba(255, 255, 255, 0.12)', color: '#F4F5F7', borderRadius: '4px', fontSize: '10px', fontWeight: 800 }}>
+                          {s}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Perforation Line */}
+                <div style={{ borderTop: '2px dashed rgba(255, 255, 255, 0.2)', margin: '0 12px' }} />
+
+                {/* Ticket Stub: QR Code & Verification State */}
+                <div
+                  style={{
+                    padding: '20px 24px',
+                    background: '#13161B',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: '9px', color: '#9CA3AF', fontWeight: 700 }}>DIGITAL PASS TOKEN</div>
+                    <div style={{ fontSize: '12px', fontWeight: 800, color: '#F4F5F7' }}>QR-84920-X88</div>
+                    <div
+                      style={{
+                        fontSize: '9px',
+                        color: '#10B981',
+                        fontWeight: 700,
+                        marginTop: '2px',
+                      }}
+                    >
+                      ● TAP OR SCAN AT BOARDING
+                    </div>
+                  </div>
+
+                  {/* Geometric QR Code SVG Placeholder */}
+                  <div
+                    style={{
+                      width: '64px',
+                      height: '64px',
+                      background: '#FFFFFF',
+                      border: '1.5px solid #10B981',
+                      borderRadius: '6px',
+                      padding: '4px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      opacity: 1,
+                    }}
+                  >
+                    <svg width="52" height="52" viewBox="0 0 24 24" fill="#16181A">
+                      <rect x="2" y="2" width="6" height="6" />
+                      <rect x="16" y="2" width="6" height="6" />
+                      <rect x="2" y="16" width="6" height="6" />
+                      <rect x="4" y="4" width="2" height="2" fill="#FFFFFF" />
+                      <rect x="18" y="4" width="2" height="2" fill="#FFFFFF" />
+                      <rect x="4" y="18" width="2" height="2" fill="#FFFFFF" />
+                      <rect x="10" y="2" width="4" height="2" />
+                      <rect x="10" y="6" width="2" height="4" />
+                      <rect x="14" y="10" width="4" height="2" />
+                      <rect x="10" y="14" width="4" height="4" />
+                      <rect x="18" y="14" width="4" height="2" />
+                      <rect x="16" y="18" width="6" height="4" />
+                    </svg>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      {/* -------------------------------------------------------- */}
+      {/* EXTRA RIDE MODAL                                         */}
+      {/* -------------------------------------------------------- */}
+      {Boolean(extraRideModalOpen) ? (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 100,
+            background: 'rgba(22, 24, 26, 0.65)',
+            backdropFilter: 'blur(6px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px',
+          }}
+        >
+          <div
+            style={{
+              width: '100%',
+              maxWidth: '480px',
+              background: '#1C2128',
+              border: '1.5px solid rgba(255, 255, 255, 0.2)',
+              boxShadow: '6px 6px 0px #0D1013',
+              borderRadius: '12px',
+              padding: '28px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '20px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '16px' }}>
+              <div>
+                <span style={{ fontSize: '10px', fontWeight: 900, padding: '3px 8px', background: '#10B981', color: '#0B1116', borderRadius: '4px' }}>
+                  PRIORITY DISPATCH
+                </span>
+                <h3 style={{ fontSize: '20px', fontWeight: 900, margin: '8px 0 4px 0', color: '#F4F5F7' }}>
+                  Request On-Demand Extra Ride
+                </h3>
+                <p style={{ fontSize: '12px', color: '#9CA3AF', margin: 0, lineHeight: 1.5 }}>
+                  For urgent campus clinic visits, unscheduled lab assignments, or accessibility transport.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setExtraRideModalOpen(false)}
+                style={{
+                  width: '28px',
+                  height: '28px',
+                  minWidth: '28px',
+                  minHeight: '28px',
+                  borderRadius: '50%',
+                  background: '#13161B',
+                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  color: '#9CA3AF',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '16px',
+                  lineHeight: 1,
+                  padding: 0,
+                  transition: 'all 0.15s ease',
+                  flexShrink: 0,
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.color = '#FFFFFF';
+                  e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.3)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.color = '#9CA3AF';
+                  e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+                }}
+                title="Close"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', marginBottom: '6px', color: '#9CA3AF' }}>
+                Urgent Destination
+              </label>
+              <select
+                value={extraDestination}
+                onChange={(e) => setExtraDestination(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '10px 12px',
+                  borderRadius: '8px',
+                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  background: '#13161B',
+                  color: '#F4F5F7',
+                }}
+              >
+                <option value="Campus Health Clinic (Urgent)">Campus Health Clinic (Urgent)</option>
+                <option value="Advanced Sciences Research Lab">Advanced Sciences Research Lab</option>
+                <option value="Main Campus Exit Gate">Main Campus Exit Gate</option>
+                <option value="Central Administration Building">Central Administration Building</option>
+              </select>
+            </div>
+
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '10px' }}>
+              <button
+                type="button"
+                onClick={() => setExtraRideModalOpen(false)}
+                title="Close modal"
+                style={{
+                  padding: '10px 16px',
+                  background: '#13161B',
+                  color: '#9CA3AF',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  borderRadius: '8px',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                onClick={handleRequestExtraRide}
+                disabled={extraConfirmed}
+                style={{
+                  padding: '10px 20px',
+                  background: extraConfirmed ? '#2E6F5E' : '#10B981',
+                  color: extraConfirmed ? '#FFFFFF' : '#0B1116',
+                  border: extraConfirmed ? '1px solid #2E6F5E' : '1px solid #10B981',
+                  boxShadow: '0 4px 14px rgba(16, 185, 129, 0.25), 3px 3px 0px #0D1013',
+                  borderRadius: '8px',
+                  fontSize: '12px',
+                  fontWeight: 900,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  transition: 'all 0.15s ease',
+                }}
+                onMouseEnter={(e) => {
+                  if (!extraConfirmed) {
+                    e.currentTarget.style.background = '#34D399';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (!extraConfirmed) {
+                    e.currentTarget.style.background = '#10B981';
+                  }
+                }}
+              >
+                {extraConfirmed ? 'Dispatched!' : 'Dispatch Nearest Cart →'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
