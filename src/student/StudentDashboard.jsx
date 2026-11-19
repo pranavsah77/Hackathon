@@ -1,4 +1,18 @@
 import React, { useState, useRef, useEffect } from 'react';
+import {
+  fetchPassRequests,
+  createPassRequest,
+  submitPassRequest,
+  getCertificateSignedUrl,
+  fetchRides,
+  updateRideStatus,
+  createExtraRide,
+  skipRide,
+  requestExtraRide,
+  fetchCarts,
+  computeEtaMinutes,
+  supabase,
+} from '../lib/supabase.js';
 
 /**
  * Available Locations for Route Dropdowns
@@ -134,32 +148,82 @@ export default function StudentDashboard({
   onReturnTo3D = () => {},
   onLogout = () => {},
 }) {
-  const currentStudentId = student?.id || 'STU-84920';
+  const currentStudentId = student?.studentId || student?.loginIdentifier || student?.id || 'STU-84920';
 
   // -----------------------------------------------------------
   // 1. SHARED PASS REQUESTS & SYNC STATE
   // -----------------------------------------------------------
-  const [requestsList, setRequestsList] = useState(getStoredRequests);
+  const [requestsList, setRequestsList] = useState([]);
 
-  // Sync across tabs & storage events
+  // Fetch real pass requests from Supabase
   useEffect(() => {
-    const handleStorageChange = () => {
-      setRequestsList(getStoredRequests());
+    let isMounted = true;
+    fetchPassRequests(student?.id)
+      .then((data) => {
+        if (!isMounted) return;
+        if (data && data.length > 0) {
+          const mapped = data.map((d) => ({
+            id: d.id,
+            request_code: d.request_code || d.id,
+            studentName: d.student_name,
+            studentId: d.student_code || d.student_id,
+            student_id: d.student?.id || d.student_id,
+            residencyType: d.residency_type,
+            mobile: d.mobile,
+            route: d.route,
+            pickup: d.pickup,
+            drop_station: d.drop_station,
+            drop: d.drop_station,
+            timeSlots: d.time_slots || ['08:30 AM', '04:30 PM'],
+            duration: d.duration,
+            medicalCondition: d.medical_condition,
+            reason: d.reason,
+            certificateName: d.certificate_name,
+            certificateUrl: d.certificate_url,
+            certificateSize: d.certificate_size,
+            certificate_path: d.certificate_path,
+            status: d.status,
+            qr_token: d.status === 'approved' ? d.qr_token : null,
+            qrToken: d.status === 'approved' ? d.qr_token : null,
+            starts_on: d.starts_on,
+            expires_on: d.expires_on,
+            adminNotes: d.review_note || '',
+            submittedAt: d.created_at,
+            submittedTime: d.created_at ? 'Today ' + new Date(d.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Today',
+          }));
+          setRequestsList(mapped);
+        } else {
+          const stored = getStoredRequests().filter(
+            (r) => r.studentId && currentStudentId && r.studentId.toUpperCase() === currentStudentId.toUpperCase()
+          );
+          setRequestsList(stored);
+        }
+      })
+      .catch((err) => console.warn('Supabase fetchPassRequests warning:', err));
+
+    return () => {
+      isMounted = false;
     };
-    window.addEventListener('storage', handleStorageChange);
-    return () => window.removeEventListener('storage', handleStorageChange);
-  }, []);
+  }, [student?.id, currentStudentId]);
+
+  // Filter requests for active student
+  const studentRequests = requestsList.filter((r) => {
+    const ident = r.student_code || r.studentId || r.student_id;
+    return (
+      (ident && currentStudentId && ident.toString().toUpperCase() === currentStudentId.toString().toUpperCase()) ||
+      (student?.id && (r.student_id === student.id || r.student?.id === student.id))
+    );
+  });
 
   // Find latest request for the active student
-  const currentRequest = requestsList.find(
-    (r) => r.studentId.toUpperCase() === currentStudentId.toUpperCase()
-  ) || requestsList[0] || null;
+  const currentRequest = studentRequests.length > 0 ? studentRequests[0] : null;
 
-  // Pass status: active once submitted / loaded
-  const passStatus = currentRequest ? currentRequest.status : 'active';
-  const isApproved = true; // Always active upon submission in 2-role system
-  const isPending = false;
-  const isRejected = false;
+  // Pass status driven strictly by real data:
+  const passStatus = currentRequest ? currentRequest.status : null;
+  const isApproved = passStatus === 'approved' || passStatus === 'active';
+  const isPending = passStatus === 'pending';
+  const isRejected = passStatus === 'rejected';
+  const isExpired = passStatus === 'expired';
 
   // -----------------------------------------------------------
   // 2. PASS BUILDER & MEDICAL FORM STATE
@@ -185,11 +249,7 @@ export default function StudentDashboard({
           size: currentRequest.certificateSize || '412 KB',
           timestamp: currentRequest.submittedTime || 'Today 09:30 AM',
         }
-      : {
-          name: 'orthopedic_clinic_referral.pdf',
-          size: '412 KB',
-          timestamp: 'Today 09:30 AM',
-        }
+      : null
   );
   const [certificatePreview, setCertificatePreview] = useState(
     currentRequest?.certificatePreview || null
@@ -198,6 +258,7 @@ export default function StudentDashboard({
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [formError, setFormError] = useState('');
   const [submitSuccessMsg, setSubmitSuccessMsg] = useState('');
+  const [isSubmittingPass, setIsSubmittingPass] = useState(false);
   const [rollKey, setRollKey] = useState(0); // Trigger vertical roll transition
   const fileInputRef = useRef(null);
 
@@ -232,8 +293,13 @@ export default function StudentDashboard({
     triggerRoll();
   };
 
+  const [uploadedFileObject, setUploadedFileObject] = useState(null);
+
+
+
   const handleFileUpload = (file) => {
     if (!file) return;
+    setUploadedFileObject(file);
 
     // Check if image for preview
     if (file.type && file.type.startsWith('image/')) {
@@ -258,8 +324,9 @@ export default function StudentDashboard({
   const durationObj = DURATIONS.find((d) => d.id === duration) || DURATIONS[1];
 
   // Submit for Verification
-  const handleSubmitVerification = (e) => {
+  const handleSubmitVerification = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
+    if (isSubmittingPass) return;
 
     if (!medicalCondition) {
       setFormError('Please select your medical condition or injury type.');
@@ -269,7 +336,7 @@ export default function StudentDashboard({
       setFormError('Please specify the reason for your monthly mobility pass.');
       return;
     }
-    if (!medicalSlip) {
+    if (!uploadedFileObject && !medicalSlip) {
       setFormError('Please upload a valid medical certificate or clinic slip (.pdf, .jpg, .png).');
       return;
     }
@@ -277,43 +344,60 @@ export default function StudentDashboard({
     const finalCondition =
       medicalCondition === 'Other' && customCondition.trim() ? customCondition.trim() : medicalCondition;
 
-    const newApplication = {
-      id: `REQ-${Date.now().toString().slice(-4)}`,
-      studentName: student.fullName || 'Student User',
-      studentId: currentStudentId,
-      residencyType: student.residencyStatus || student.hostelBlock || 'Hostler',
-      mobile: student.phone || '+91 98765 43210',
-      route: `${pickup} → ${drop}`,
-      pickup,
-      drop,
-      timeSlots: selectedSlots,
-      duration: durationObj.label,
-      medicalCondition: finalCondition,
-      reason: reason.trim(),
-      certificateName: medicalSlip.name,
-      certificatePreview: certificatePreview || null,
-      certificateSize: medicalSlip.size,
-      status: 'active',
-      submittedAt: new Date().toISOString(),
-      submittedTime: 'Today ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    };
+    setIsSubmittingPass(true);
+    setFormError('');
 
     try {
-      const existing = getStoredRequests();
-      const updated = [
-        newApplication,
-        ...existing.filter((r) => r.studentId.toUpperCase() !== currentStudentId.toUpperCase()),
-      ];
-      localStorage.setItem('qartix_pass_requests', JSON.stringify(updated));
-      setRequestsList(updated);
-    } catch (err) {
-      console.error('Failed to save pass request to localStorage', err);
-    }
+      const result = await submitPassRequest({
+        studentProfile: student,
+        pickup,
+        drop,
+        route: `${pickup} → ${drop}`,
+        timeSlots: selectedSlots,
+        duration: durationObj.label,
+        medicalCondition: finalCondition,
+        reason: reason.trim(),
+        certificateFile: uploadedFileObject,
+        certificateName: medicalSlip ? medicalSlip.name : 'medical_doc.pdf',
+        certificateSize: medicalSlip ? medicalSlip.size : '450 KB',
+      });
 
-    setFormError('');
-    setSubmitSuccessMsg(`Pass submitted & active! Transport office notified. Request ID: ${newApplication.id}.`);
-    triggerRoll();
-    setTimeout(() => setSubmitSuccessMsg(''), 7000);
+      const newRecord = {
+        id: result.request_code || result.id,
+        request_code: result.request_code || result.id,
+        studentName: student.fullName || 'Student User',
+        studentId: currentStudentId,
+        student_id: student.id,
+        residencyType: student.residencyStatus || student.hostelBlock || 'Hostler',
+        mobile: student.phone || '+91 98765 43210',
+        route: `${pickup} → ${drop}`,
+        pickup,
+        drop,
+        drop_station: drop,
+        timeSlots: selectedSlots,
+        duration: durationObj.label,
+        medicalCondition: finalCondition,
+        reason: reason.trim(),
+        certificateName: medicalSlip ? medicalSlip.name : 'medical_doc.pdf',
+        certificatePreview: certificatePreview || null,
+        certificateSize: medicalSlip ? medicalSlip.size : '450 KB',
+        certificate_path: result.certificate_path,
+        status: 'pending',
+        qr_token: null,
+        qrToken: null,
+        submittedAt: new Date().toISOString(),
+        submittedTime: 'Today ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+
+      setRequestsList((prev) => [newRecord, ...prev.filter((r) => r.id !== newRecord.id)]);
+      setSubmitSuccessMsg(`Pass application ${newRecord.request_code} filed! Status: PENDING Transport Office review.`);
+      triggerRoll();
+      setTimeout(() => setSubmitSuccessMsg(''), 8000);
+    } catch (err) {
+      setFormError(err.message || 'Failed to submit pass request. Please verify your details.');
+    } finally {
+      setIsSubmittingPass(false);
+    }
   };
 
   // -----------------------------------------------------------
@@ -343,32 +427,239 @@ export default function StudentDashboard({
     },
   ]);
 
-  const [extraRideModalOpen, setExtraRideModalOpen] = useState(false);
-  const [extraDestination, setExtraDestination] = useState('Campus Health Clinic (Urgent)');
-  const [extraConfirmed, setExtraConfirmed] = useState(false);
+  // Live Cart Telemetry State
+  const [liveCart, setLiveCart] = useState({
+    cartNumber: 'CART #04',
+    etaMinutes: 4,
+    speedKmh: 14,
+    currentStation: 'Science Concourse Station',
+    routeLabel: 'ROUTE 01 ACTIVE',
+    progressPercent: 68,
+    originStation: 'Departed Central Quad',
+    pickupStation: 'Science Concourse Station',
+    destinationStation: 'Destination Core',
+  });
+  const [activeCartId, setActiveCartId] = useState(null);
+  const activeNextRideRef = useRef(null);
 
-  const toggleSkipRide = (rideId) => {
-    setRides((prev) =>
-      prev.map((r) => (r.id === rideId ? { ...r, skipped: !r.skipped } : r))
-    );
+  // Sync Today's Scheduled Rides from Supabase with Realtime Subscription
+  const loadTodayRides = () => {
+    fetchRides({ today: true, studentId: student?.id })
+      .then((ridesData) => {
+        if (!ridesData || ridesData.length === 0) return;
+        const mapped = ridesData.map((r) => ({
+          id: r.id,
+          time: r.scheduled_time || '08:30 AM',
+          route: r.route || `${r.pickup} → ${r.drop_station}`,
+          status: r.status_label || (r.skipped ? 'SKIPPED' : 'SCHEDULED'),
+          raw_status: r.raw_status || r.status,
+          skipped: r.skipped || r.raw_status === 'skipped',
+          cart_id: r.cart_id,
+          cart_number: r.cart?.cart_number || 'CART-04',
+          pickup_station: r.pickup_station,
+          drop_station: r.drop_station,
+          pickup_name: r.pickup,
+          drop_name: r.drop_station,
+        }));
+        setRides(mapped);
+
+        // Find student's next upcoming ride
+        const nextRide = mapped.find(
+          (r) => ['approaching', 'arrived', 'in_progress', 'scheduled'].includes(r.raw_status) && !r.skipped
+        );
+
+        if (nextRide) {
+          activeNextRideRef.current = nextRide;
+          if (nextRide.cart_id && nextRide.cart_id !== activeCartId) {
+            setActiveCartId(nextRide.cart_id);
+          }
+          const cartNumFormatted = nextRide.cart_number ? nextRide.cart_number.replace('-', ' #') : 'CART #04';
+          setLiveCart((prev) => ({
+            ...prev,
+            cartNumber: cartNumFormatted,
+            currentStation: nextRide.pickup_name || prev.currentStation,
+            routeLabel: `${nextRide.route || 'ROUTE 01 ACTIVE'} • LIVE`,
+            pickupStation: nextRide.pickup_name || 'Pickup Station',
+            destinationStation: nextRide.drop_name || 'Destination Core',
+          }));
+        }
+      })
+      .catch((err) => console.warn('Supabase fetchRides warning:', err));
   };
 
-  const handleRequestExtraRide = () => {
+  useEffect(() => {
+    loadTodayRides();
+
+    // Supabase Realtime Channel: Listen for Ride status updates & dispatches
+    const channel = supabase
+      .channel('student-rides-realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'rides' },
+        () => {
+          loadTodayRides();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [student?.id]);
+
+  // Live Tracker: Subscribes via Supabase Realtime to the cart for student's next ride only
+  // Computes dynamic ETA from cart distance to pickup station and cart speed
+  useEffect(() => {
+    if (!activeCartId) {
+      // Fallback initial fleet cart fetch if student has no assigned active ride yet
+      fetchCarts()
+        .then((carts) => {
+          if (!carts || carts.length === 0) return;
+          const c = carts.find((x) => x.status === 'online') || carts[0];
+          if (c) {
+            setLiveCart((prev) => ({
+              ...prev,
+              cartNumber: c.cart_number ? c.cart_number.replace('-', ' #') : 'CART #04',
+              etaMinutes: c.eta_minutes || 4,
+              speedKmh: c.speed_kmh || 14,
+            }));
+          }
+        })
+        .catch(() => {});
+      return;
+    }
+
+    // Fetch initial cart snapshot
+    supabase
+      .from('carts')
+      .select('*')
+      .eq('id', activeCartId)
+      .single()
+      .then(({ data: cartData }) => {
+        if (!cartData) return;
+        const nextRide = activeNextRideRef.current;
+        const pickupCoords =
+          nextRide?.pickup_station?.lat && nextRide?.pickup_station?.lng
+            ? { lat: nextRide.pickup_station.lat, lng: nextRide.pickup_station.lng }
+            : { lat: 12.9735, lng: 77.5960 };
+        const cartCoords = { lat: cartData.lat, lng: cartData.lng };
+        const speed = cartData.speed_kmh || 14;
+        const eta = computeEtaMinutes(cartCoords, pickupCoords, speed);
+        const progress = eta <= 1 ? 94 : eta <= 3 ? 75 : eta <= 5 ? 58 : 35;
+
+        setLiveCart((prev) => ({
+          ...prev,
+          cartNumber: cartData.cart_number ? cartData.cart_number.replace('-', ' #') : prev.cartNumber,
+          etaMinutes: eta,
+          speedKmh: speed,
+          progressPercent: progress,
+        }));
+      });
+
+    // Realtime channel subscribed strictly to this student's next cart
+    const cartChannel = supabase
+      .channel(`cart-tracking-${activeCartId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'carts',
+          filter: `id=eq.${activeCartId}`,
+        },
+        (payload) => {
+          const updatedCart = payload.new;
+          if (!updatedCart) return;
+
+          const nextRide = activeNextRideRef.current;
+          const pickupCoords =
+            nextRide?.pickup_station?.lat && nextRide?.pickup_station?.lng
+              ? { lat: nextRide.pickup_station.lat, lng: nextRide.pickup_station.lng }
+              : { lat: 12.9735, lng: 77.5960 };
+          const cartCoords = { lat: updatedCart.lat, lng: updatedCart.lng };
+          const speed = updatedCart.speed_kmh || 14;
+          const eta = computeEtaMinutes(cartCoords, pickupCoords, speed);
+          const progress = eta <= 1 ? 95 : eta <= 3 ? 75 : eta <= 5 ? 58 : 35;
+
+          setLiveCart((prev) => ({
+            ...prev,
+            cartNumber: updatedCart.cart_number ? updatedCart.cart_number.replace('-', ' #') : prev.cartNumber,
+            etaMinutes: eta,
+            speedKmh: speed,
+            progressPercent: progress,
+          }));
+        }
+      )
+      .subscribe();
+
+    // Clean up channel subscription on unmount
+    return () => {
+      supabase.removeChannel(cartChannel);
+    };
+  }, [activeCartId]);
+
+  const [extraRideModalOpen, setExtraRideModalOpen] = useState(false);
+  const [extraDestination, setExtraDestination] = useState('Campus Health & Sports Pavilion');
+  const [extraConfirmed, setExtraConfirmed] = useState(false);
+
+  // Optimistic Skip Today with Rollback
+  const handleSkipRide = async (rideId) => {
+    const target = rides.find((r) => r.id === rideId);
+    if (!target || target.skipped || target.raw_status === 'completed') return;
+
+    // Snapshot previous state for rollback
+    const prevRides = [...rides];
+
+    // Optimistic UI update
+    setRides((prev) =>
+      prev.map((r) =>
+        r.id === rideId
+          ? { ...r, skipped: true, status: 'SKIPPED', raw_status: 'skipped' }
+          : r
+      )
+    );
+
+    try {
+      await skipRide(rideId);
+    } catch (err) {
+      // Rollback on failure
+      setRides(prevRides);
+      alert(err.message || 'Unable to skip ride. 15-minute notice requirement not met.');
+    }
+  };
+
+  const handleRequestExtraRide = async () => {
     setExtraConfirmed(true);
-    setTimeout(() => {
-      setExtraConfirmed(false);
-      setExtraRideModalOpen(false);
+    try {
+      const res = await requestExtraRide({
+        pickup: pickup || 'Science Concourse Station',
+        drop: extraDestination || 'Campus Health & Sports Pavilion',
+        requestedTime: new Date().toISOString(),
+      });
+
+      const newRide = res?.ride;
+      const statusBadge = res?.cart_assigned ? 'PRIORITY DISPATCH • 5 MINS' : 'REQUESTED • QUEUED';
+
       setRides((prev) => [
         {
-          id: `ride-extra-${Date.now()}`,
+          id: newRide?.id || `ride-extra-${Date.now()}`,
           time: 'IMMEDIATE',
-          route: `Current Station → ${extraDestination}`,
-          status: 'PRIORITY DISPATCH • 2 MINS',
+          route: `${pickup || 'Current Station'} → ${extraDestination}`,
+          status: statusBadge,
+          raw_status: 'requested',
           skipped: false,
         },
         ...prev,
       ]);
-    }, 1200);
+
+      setTimeout(() => {
+        setExtraConfirmed(false);
+        setExtraRideModalOpen(false);
+      }, 700);
+    } catch (err) {
+      setExtraConfirmed(false);
+      alert(err.message || 'Failed to request extra ride.');
+    }
   };
 
   return (
@@ -486,7 +777,7 @@ export default function StudentDashboard({
               }}
             />
             <span style={{ color: '#9CA3AF' }}>ID:</span>
-            <span style={{ fontFamily: 'monospace', fontWeight: 800, color: '#F4F5F7' }}>{student.id || 'STU-84920'}</span>
+            <span style={{ fontFamily: 'monospace', fontWeight: 800, color: '#F4F5F7' }}>{currentStudentId}</span>
           </div>
         </div>
 
@@ -564,9 +855,27 @@ export default function StudentDashboard({
           {/* STATUS NOTIFICATION BANNER */}
           <div
             style={{
-              background: 'rgba(16, 185, 129, 0.08)',
-              border: '1px solid rgba(16, 185, 129, 0.3)',
-              borderLeft: '5px solid #10B981',
+              background: isApproved
+                ? 'rgba(16, 185, 129, 0.08)'
+                : isPending
+                ? 'rgba(245, 158, 11, 0.08)'
+                : isRejected
+                ? 'rgba(239, 68, 68, 0.08)'
+                : 'rgba(28, 33, 40, 0.5)',
+              border: isApproved
+                ? '1px solid rgba(16, 185, 129, 0.3)'
+                : isPending
+                ? '1px solid rgba(245, 158, 11, 0.3)'
+                : isRejected
+                ? '1px solid rgba(239, 68, 68, 0.3)'
+                : '1px solid rgba(255, 255, 255, 0.1)',
+              borderLeft: isApproved
+                ? '5px solid #10B981'
+                : isPending
+                ? '5px solid #F59E0B'
+                : isRejected
+                ? '5px solid #EF4444'
+                : '5px solid #6B7280',
               boxShadow: '0 4px 16px rgba(0, 0, 0, 0.25)',
               borderRadius: '12px',
               padding: '18px 24px',
@@ -582,24 +891,61 @@ export default function StudentDashboard({
                     width: '36px',
                     height: '36px',
                     borderRadius: '50%',
-                    background: 'rgba(16, 185, 129, 0.15)',
-                    border: '1px solid #10B981',
+                    background: isApproved
+                      ? 'rgba(16, 185, 129, 0.15)'
+                      : isPending
+                      ? 'rgba(245, 158, 11, 0.15)'
+                      : isRejected
+                      ? 'rgba(239, 68, 68, 0.15)'
+                      : 'rgba(255, 255, 255, 0.05)',
+                    border: isApproved
+                      ? '1px solid #10B981'
+                      : isPending
+                      ? '1px solid #F59E0B'
+                      : isRejected
+                      ? '1px solid #EF4444'
+                      : '1px solid #6B7280',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    color: '#10B981',
+                    color: isApproved ? '#10B981' : isPending ? '#F59E0B' : isRejected ? '#EF4444' : '#9CA3AF',
                     flexShrink: 0,
                   }}
                 >
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M20 6 9 17l-5-5" />
-                  </svg>
+                  {isApproved ? (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M20 6 9 17l-5-5" />
+                    </svg>
+                  ) : isPending ? (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10" />
+                      <polyline points="12 6 12 12 16 14" />
+                    </svg>
+                  ) : isRejected ? (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="15" y1="9" x2="9" y2="15" />
+                      <line x1="9" y1="9" x2="15" y2="15" />
+                    </svg>
+                  ) : (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="12" y1="8" x2="12" y2="12" />
+                      <line x1="12" y1="16" x2="12.01" y2="16" />
+                    </svg>
+                  )}
                 </div>
 
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <h3 style={{ fontSize: '15px', fontWeight: 800, margin: 0, color: '#F4F5F7' }}>
-                      Monthly Pass Active • Medical Record Notified ({currentRequest?.id || 'REQ-8492'})
+                      {isApproved
+                        ? `Monthly Pass Active • Medical Record Verified (${currentRequest?.request_code || currentRequest?.id})`
+                        : isPending
+                        ? `Pass Application Pending Review (${currentRequest?.request_code || currentRequest?.id})`
+                        : isRejected
+                        ? `Pass Application Rejected (${currentRequest?.request_code || currentRequest?.id})`
+                        : 'No Active Mobility Pass'}
                     </h3>
                     <span
                       style={{
@@ -609,17 +955,35 @@ export default function StudentDashboard({
                         fontWeight: 900,
                         textTransform: 'uppercase',
                         letterSpacing: '0.04em',
-                        background: 'rgba(16, 185, 129, 0.2)',
-                        color: '#10B981',
-                        border: '1px solid rgba(16, 185, 129, 0.4)',
+                        background: isApproved
+                          ? 'rgba(16, 185, 129, 0.2)'
+                          : isPending
+                          ? 'rgba(245, 158, 11, 0.2)'
+                          : isRejected
+                          ? 'rgba(239, 68, 68, 0.2)'
+                          : 'rgba(255, 255, 255, 0.08)',
+                        color: isApproved ? '#10B981' : isPending ? '#F59E0B' : isRejected ? '#EF4444' : '#9CA3AF',
+                        border: isApproved
+                          ? '1px solid rgba(16, 185, 129, 0.4)'
+                          : isPending
+                          ? '1px solid rgba(245, 158, 11, 0.4)'
+                          : isRejected
+                          ? '1px solid rgba(239, 68, 68, 0.4)'
+                          : '1px solid rgba(255, 255, 255, 0.15)',
                       }}
                     >
-                      ACTIVE
+                      {isApproved ? 'ACTIVE' : isPending ? 'PENDING' : isRejected ? 'REJECTED' : 'UNFILED'}
                     </span>
                   </div>
 
                   <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#9CA3AF', lineHeight: 1.4 }}>
-                    Your campus medical mobility pass is active. Medical documentation has been recorded and the campus transport office notified. Scheduled rides and live cart tracking are unlocked.
+                    {isApproved
+                      ? 'Your campus medical mobility pass is active and authorized for priority boarding. Scheduled rides and live cart tracking are unlocked.'
+                      : isPending
+                      ? 'Your pass application and uploaded medical certificate have been filed with the campus transport office. Status: PENDING review by campus fleet administrators.'
+                      : isRejected
+                      ? (currentRequest?.adminNotes || 'Your pass request was rejected. Please review administrator notes or submit updated clinic documentation.')
+                      : 'Submit your medical details and clinic document below to activate your electric cart pass.'}
                   </p>
                 </div>
               </div>
@@ -654,7 +1018,7 @@ export default function StudentDashboard({
                   }}
                 />
                 <h2 style={{ fontSize: '20px', fontWeight: 900, margin: 0, letterSpacing: '0.04em', color: '#F4F5F7' }}>
-                  CART #04 • 4 MINS AWAY
+                  {liveCart.cartNumber} • {liveCart.etaMinutes} MINS AWAY
                 </h2>
                 <span
                   style={{
@@ -668,12 +1032,12 @@ export default function StudentDashboard({
                     color: '#F4F5F7',
                   }}
                 >
-                  ROUTE 01 ACTIVE
+                  {liveCart.routeLabel}
                 </span>
               </div>
 
               <div style={{ fontSize: '12px', fontWeight: 600, color: '#9CA3AF' }}>
-                Approaching: <strong style={{ color: '#F4F5F7' }}>Science Concourse Station</strong> • Speed: <strong style={{ color: '#F4F5F7' }}>14 km/h</strong>
+                Approaching: <strong style={{ color: '#F4F5F7' }}>{liveCart.currentStation}</strong> • Speed: <strong style={{ color: '#F4F5F7' }}>{liveCart.speedKmh} km/h</strong>
               </div>
             </div>
 
@@ -697,7 +1061,7 @@ export default function StudentDashboard({
                     borderRight: '2px solid #10B981',
                     borderRadius: '5px',
                     animation: isApproved ? 'pulseTrack 4s ease-in-out infinite' : 'none',
-                    width: isApproved ? '68%' : '20%',
+                    width: isApproved ? `${liveCart.progressPercent || 68}%` : '20%',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'flex-end',
@@ -708,9 +1072,9 @@ export default function StudentDashboard({
                 </div>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', fontWeight: 700, color: '#9CA3AF' }}>
-                <span>Departed Central Quad</span>
-                <span style={{ color: '#10B981' }}>● En Route to Pickup</span>
-                <span>Destination Core</span>
+                <span>{liveCart.originStation || 'Departed Central Quad'}</span>
+                <span style={{ color: '#10B981' }}>● En Route to {liveCart.pickupStation || 'Pickup'}</span>
+                <span>{liveCart.destinationStation || 'Destination Core'}</span>
               </div>
             </div>
           </div>
@@ -818,24 +1182,26 @@ export default function StudentDashboard({
                     </div>
                   </div>
 
-                  {/* Skip Today Toggle Button */}
+                  {/* Skip Today Button with Optimistic UI & Rollback */}
                   <button
                     type="button"
-                    onClick={() => toggleSkipRide(r.id)}
+                    onClick={() => handleSkipRide(r.id)}
+                    disabled={r.skipped || r.raw_status === 'completed'}
                     style={{
                       padding: '6px 14px',
                       borderRadius: '6px',
                       border: '1px solid rgba(255, 255, 255, 0.12)',
-                      background: r.skipped ? '#10B981' : '#1C2128',
-                      color: r.skipped ? '#0B1116' : '#FFFFFF',
-                      boxShadow: r.skipped ? '0 2px 8px rgba(16, 185, 129, 0.3)' : '2px 2px 0px #0D1013',
+                      background: r.skipped ? 'rgba(239, 68, 68, 0.12)' : '#1C2128',
+                      color: r.skipped ? '#EF4444' : '#FFFFFF',
+                      boxShadow: r.skipped ? 'none' : '2px 2px 0px #0D1013',
                       fontSize: '11px',
                       fontWeight: 800,
-                      cursor: 'pointer',
+                      cursor: r.skipped || r.raw_status === 'completed' ? 'not-allowed' : 'pointer',
+                      opacity: r.skipped || r.raw_status === 'completed' ? 0.7 : 1,
                       transition: 'all 0.15s ease',
                     }}
                   >
-                    {r.skipped ? 'Reactivate Ride' : 'Skip Today'}
+                    {r.skipped ? '● Skipped for Today' : r.raw_status === 'completed' ? 'Completed' : 'Skip Today'}
                   </button>
                 </div>
               ))}
@@ -1283,35 +1649,71 @@ export default function StudentDashboard({
               {/* Submit for Verification Button */}
               <button
                 type="submit"
+                disabled={isSubmittingPass || isPending}
                 style={{
                   marginTop: '8px',
                   padding: '14px 20px',
-                  background: '#10B981',
-                  color: '#0B1116',
-                  border: '1px solid #10B981',
-                  boxShadow: '0 4px 16px rgba(16, 185, 129, 0.3), 3px 3px 0px #0D1013',
+                  background: isPending ? 'rgba(245, 158, 11, 0.15)' : isSubmittingPass ? '#059669' : '#10B981',
+                  color: isPending ? '#FBBF24' : '#0B1116',
+                  border: isPending ? '1px solid #F59E0B' : '1px solid #10B981',
+                  boxShadow: isPending ? 'none' : '0 4px 16px rgba(16, 185, 129, 0.3), 3px 3px 0px #0D1013',
                   borderRadius: '8px',
                   fontSize: '13px',
                   fontWeight: 900,
                   letterSpacing: '0.04em',
-                  cursor: 'pointer',
+                  cursor: isPending || isSubmittingPass ? 'not-allowed' : 'pointer',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: '8px',
                   transition: 'all 0.15s ease',
+                  opacity: isPending || isSubmittingPass ? 0.85 : 1,
                 }}
                 onMouseEnter={(e) => {
-                  e.currentTarget.style.background = '#34D399';
-                  e.currentTarget.style.boxShadow = '0 6px 20px rgba(16, 185, 129, 0.45), 3px 3px 0px #0D1013';
+                  if (!isPending && !isSubmittingPass) {
+                    e.currentTarget.style.background = '#34D399';
+                    e.currentTarget.style.boxShadow = '0 6px 20px rgba(16, 185, 129, 0.45), 3px 3px 0px #0D1013';
+                  }
                 }}
                 onMouseLeave={(e) => {
-                  e.currentTarget.style.background = '#10B981';
-                  e.currentTarget.style.boxShadow = '0 4px 16px rgba(16, 185, 129, 0.3), 3px 3px 0px #0D1013';
+                  if (!isPending && !isSubmittingPass) {
+                    e.currentTarget.style.background = '#10B981';
+                    e.currentTarget.style.boxShadow = '0 4px 16px rgba(16, 185, 129, 0.3), 3px 3px 0px #0D1013';
+                  }
                 }}
               >
-                <span>Submit for Verification →</span>
+                <span>
+                  {isSubmittingPass
+                    ? 'Validating & Uploading...'
+                    : isPending
+                    ? `Pass Application Under Review (${currentRequest?.request_code || currentRequest?.id})`
+                    : isApproved
+                    ? 'Pass Active • Submit New Renewal Request'
+                    : 'Submit for Verification →'}
+                </span>
               </button>
+
+              {/* Medical Privacy & Consent Notice */}
+              <div
+                style={{
+                  fontSize: '11px',
+                  color: '#9CA3AF',
+                  lineHeight: 1.45,
+                  padding: '10px 12px',
+                  background: 'rgba(255, 255, 255, 0.03)',
+                  border: '1px solid rgba(255, 255, 255, 0.08)',
+                  borderRadius: '6px',
+                  marginTop: '10px',
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '8px',
+                }}
+              >
+                <span style={{ color: '#10B981', fontSize: '13px', lineHeight: 1 }}>🔒</span>
+                <div>
+                  <strong style={{ color: '#E5E7EB' }}>Privacy & Data Minimization Notice:</strong> By submitting, you consent to the Campus Health Clinic and Transport Office reviewing your medical referral solely to verify mobility accommodation eligibility. Documents are stored in an encrypted private bucket with 60-second signed URLs and automatically purged 30 days after pass expiration.
+                </div>
+              </div>
             </form>
 
             {/* ---------------------------------------------------- */}
@@ -1407,44 +1809,82 @@ export default function StudentDashboard({
                       fontWeight: 800,
                       letterSpacing: '0.06em',
                       textTransform: 'uppercase',
-                      background: 'rgba(16, 185, 129, 0.2)',
-                      color: '#10B981',
-                      border: '1px solid rgba(16, 185, 129, 0.4)',
+                      background: isApproved
+                        ? 'rgba(16, 185, 129, 0.2)'
+                        : isPending
+                        ? 'rgba(245, 158, 11, 0.2)'
+                        : isRejected
+                        ? 'rgba(239, 68, 68, 0.2)'
+                        : 'rgba(255, 255, 255, 0.08)',
+                      color: isApproved ? '#10B981' : isPending ? '#F59E0B' : isRejected ? '#EF4444' : '#9CA3AF',
+                      border: isApproved
+                        ? '1px solid rgba(16, 185, 129, 0.4)'
+                        : isPending
+                        ? '1px solid rgba(245, 158, 11, 0.4)'
+                        : isRejected
+                        ? '1px solid rgba(239, 68, 68, 0.4)'
+                        : '1px solid rgba(255, 255, 255, 0.15)',
                     }}
                   >
-                    PASS SUBMITTED • TRANSPORT OFFICE NOTIFIED
+                    {isApproved
+                      ? 'PASS ACTIVE • VERIFIED'
+                      : isPending
+                      ? 'PENDING VERIFICATION • TRANSPORT OFFICE REVIEW'
+                      : isRejected
+                      ? 'APPLICATION REJECTED'
+                      : 'BUILD YOUR PASS'}
                   </span>
                 </div>
 
                 {/* Ticket Body: IBM Plex Mono Route Metadata & Stamp */}
                 <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px', position: 'relative' }}>
                   {/* Status-Aligned Ink Stamp Slam Animation */}
-                  <div
-                    key={`stamp-${rollKey}`}
-                    style={{
-                      position: 'absolute',
-                      top: '42%',
-                      left: '50%',
-                      transform: 'translate(-50%, -50%) rotate(-4deg)',
-                      border: '3px double #10B981',
-                      borderRadius: '8px',
-                      padding: '6px 14px',
-                      color: '#10B981',
-                      textAlign: 'center',
-                      zIndex: 20,
-                      background: 'rgba(28, 33, 40, 0.95)',
-                      boxShadow: '0 4px 16px rgba(16, 185, 129, 0.4)',
-                      animation: 'stampSlam 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards',
-                      pointerEvents: 'none',
-                    }}
-                  >
-                    <div style={{ fontSize: '12px', fontWeight: 900, letterSpacing: '0.1em' }}>
-                      PASS SUBMITTED • RECORD FILED
+                  {currentRequest && (
+                    <div
+                      key={`stamp-${rollKey}`}
+                      style={{
+                        position: 'absolute',
+                        top: '42%',
+                        left: '50%',
+                        transform: 'translate(-50%, -50%) rotate(-4deg)',
+                        border: isApproved
+                          ? '3px double #10B981'
+                          : isPending
+                          ? '3px double #F59E0B'
+                          : '3px double #EF4444',
+                        borderRadius: '8px',
+                        padding: '6px 14px',
+                        color: isApproved ? '#10B981' : isPending ? '#F59E0B' : '#EF4444',
+                        textAlign: 'center',
+                        zIndex: 20,
+                        background: 'rgba(28, 33, 40, 0.95)',
+                        boxShadow: isApproved
+                          ? '0 4px 16px rgba(16, 185, 129, 0.4)'
+                          : isPending
+                          ? '0 4px 16px rgba(245, 158, 11, 0.35)'
+                          : '0 4px 16px rgba(239, 68, 68, 0.4)',
+                        animation: 'stampSlam 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+                        pointerEvents: 'none',
+                      }}
+                    >
+                      <div style={{ fontSize: '12px', fontWeight: 900, letterSpacing: '0.1em' }}>
+                        {isApproved
+                          ? 'PASS APPROVED • VERIFIED'
+                          : isPending
+                          ? 'PASS SUBMITTED • UNDER REVIEW'
+                          : 'APPLICATION REJECTED'}
+                      </div>
+                      <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.08em' }}>
+                        {isApproved
+                          ? 'TRANSPORT OFFICE AUTHORIZED • ACTIVE ACCESS'
+                          : isPending
+                          ? 'TRANSPORT OFFICE NOTIFIED • VERIFICATION PENDING'
+                          : currentRequest.adminNotes
+                          ? `REASON: ${currentRequest.adminNotes}`
+                          : 'CRITERIA NOT MET'}
+                      </div>
                     </div>
-                    <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.08em' }}>
-                      TRANSPORT OFFICE NOTIFIED • ACTIVE ACCESS
-                    </div>
-                  </div>
+                  )}
 
                   {/* Route Trajectory */}
                   <div>
@@ -1523,16 +1963,34 @@ export default function StudentDashboard({
                 >
                   <div>
                     <div style={{ fontSize: '9px', color: '#9CA3AF', fontWeight: 700 }}>DIGITAL PASS TOKEN</div>
-                    <div style={{ fontSize: '12px', fontWeight: 800, color: '#F4F5F7' }}>QR-84920-X88</div>
+                    <div
+                      style={{
+                        fontSize: '12px',
+                        fontWeight: 800,
+                        color: isApproved ? '#F4F5F7' : isPending ? '#F59E0B' : '#9CA3AF',
+                        fontFamily: 'monospace',
+                        letterSpacing: '0.02em',
+                      }}
+                    >
+                      {isApproved
+                        ? (currentRequest?.qr_token || currentRequest?.qrToken || 'QARTIX-ACTIVE')
+                        : isPending
+                        ? 'TOKEN GENERATES ON APPROVAL'
+                        : 'NO ACTIVE TOKEN'}
+                    </div>
                     <div
                       style={{
                         fontSize: '9px',
-                        color: '#10B981',
+                        color: isApproved ? '#10B981' : isPending ? '#F59E0B' : '#9CA3AF',
                         fontWeight: 700,
                         marginTop: '2px',
                       }}
                     >
-                      ● TAP OR SCAN AT BOARDING
+                      {isApproved
+                        ? '● TAP OR SCAN AT BOARDING'
+                        : isPending
+                        ? '⏳ AWAITING VERIFICATION'
+                        : '○ INACTIVE'}
                     </div>
                   </div>
 
@@ -1542,14 +2000,16 @@ export default function StudentDashboard({
                       width: '64px',
                       height: '64px',
                       background: '#FFFFFF',
-                      border: '1.5px solid #10B981',
+                      border: isApproved ? '1.5px solid #10B981' : '1.5px solid #4B5563',
                       borderRadius: '6px',
                       padding: '4px',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      opacity: 1,
+                      opacity: isApproved ? 1 : 0.35,
+                      filter: isApproved ? 'none' : 'grayscale(1)',
                     }}
+                    title={isApproved ? 'Scan to board' : 'Pass QR token generated upon approval'}
                   >
                     <svg width="52" height="52" viewBox="0 0 24 24" fill="#16181A">
                       <rect x="2" y="2" width="6" height="6" />
@@ -1570,6 +2030,142 @@ export default function StudentDashboard({
               </div>
             </div>
           </div>
+
+          {/* ---------------------------------------------------- */}
+          {/* STUDENT PASS REQUEST HISTORY & STATUS                */}
+          {/* ---------------------------------------------------- */}
+          {studentRequests.length > 0 && (
+            <div
+              style={{
+                marginTop: '24px',
+                background: '#1C2128',
+                border: '1px solid rgba(255, 255, 255, 0.12)',
+                boxShadow: '4px 4px 0px #0D1013',
+                borderRadius: '12px',
+                padding: '24px',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
+                <div>
+                  <h3 style={{ fontSize: '16px', fontWeight: 800, margin: 0, color: '#F4F5F7' }}>
+                    My Pass Applications & Verification History
+                  </h3>
+                  <p style={{ margin: '3px 0 0 0', fontSize: '12px', color: '#9CA3AF' }}>
+                    Real-time status updates from the campus transport office.
+                  </p>
+                </div>
+                <span
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: '6px',
+                    background: '#13161B',
+                    border: '1px solid rgba(255, 255, 255, 0.1)',
+                    fontSize: '11px',
+                    color: '#9CA3AF',
+                    fontWeight: 700,
+                  }}
+                >
+                  {studentRequests.length} {studentRequests.length === 1 ? 'Application' : 'Applications'}
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                {studentRequests.map((req) => {
+                  const reqStatus = req.status || 'pending';
+                  const isApp = reqStatus === 'approved' || reqStatus === 'active';
+                  const isPend = reqStatus === 'pending';
+
+                  return (
+                    <div
+                      key={req.id || req.request_code}
+                      style={{
+                        padding: '14px 18px',
+                        background: '#13161B',
+                        border: '1px solid rgba(255, 255, 255, 0.08)',
+                        borderRadius: '8px',
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '12px',
+                      }}
+                    >
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{ fontFamily: 'monospace', fontWeight: 800, color: '#10B981', fontSize: '13px' }}>
+                            {req.request_code || req.id}
+                          </span>
+                          <span
+                            style={{
+                              padding: '2px 8px',
+                              borderRadius: '4px',
+                              fontSize: '10px',
+                              fontWeight: 800,
+                              textTransform: 'uppercase',
+                              background: isApp
+                                ? 'rgba(16, 185, 129, 0.15)'
+                                : isPend
+                                ? 'rgba(245, 158, 11, 0.15)'
+                                : 'rgba(239, 68, 68, 0.15)',
+                              color: isApp ? '#10B981' : isPend ? '#FBBF24' : '#F87171',
+                              border: isApp
+                                ? '1px solid rgba(16, 185, 129, 0.3)'
+                                : isPend
+                                ? '1px solid rgba(245, 158, 11, 0.3)'
+                                : '1px solid rgba(239, 68, 68, 0.3)',
+                            }}
+                          >
+                            {reqStatus}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: '12px', color: '#F4F5F7', fontWeight: 600 }}>
+                          {req.route || `${req.pickup} → ${req.drop_station || req.drop}`}
+                        </div>
+                        <div style={{ fontSize: '11px', color: '#9CA3AF' }}>
+                          Condition: <strong style={{ color: '#D1D5DB' }}>{req.medical_condition || req.medicalCondition}</strong> • Duration: {req.duration}
+                        </div>
+                        {req.admin_notes || req.adminNotes || req.review_note ? (
+                          <div style={{ fontSize: '11px', color: '#9CA3AF', marginTop: '2px' }}>
+                            Office Remarks: <span style={{ color: isApp ? '#A7F3D0' : isPend ? '#FDE68A' : '#FECACA', fontStyle: 'italic' }}>"{req.admin_notes || req.adminNotes || req.review_note}"</span>
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        {req.starts_on && req.expires_on && (
+                          <div style={{ textAlign: 'right', fontSize: '10px', color: '#9CA3AF' }}>
+                            <div>Valid: {req.starts_on}</div>
+                            <div>Until: {req.expires_on}</div>
+                          </div>
+                        )}
+                        {req.certificate_path && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const url = await getCertificateSignedUrl(req.certificate_path);
+                              if (url) window.open(url, '_blank');
+                            }}
+                            style={{
+                              padding: '6px 12px',
+                              background: '#1C2128',
+                              border: '1px solid rgba(255, 255, 255, 0.15)',
+                              borderRadius: '6px',
+                              color: '#F4F5F7',
+                              fontSize: '11px',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            View Document
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </section>
       </main>
 

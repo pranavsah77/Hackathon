@@ -39,6 +39,7 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 
 <body>
@@ -46,6 +47,34 @@
 
   <script type="text/babel">
     const { useState, useEffect, useRef, useCallback } = React;
+
+    // Supabase Public Configuration & Client
+    const SUPABASE_URL = 'https://arbwqtudubtyxufbjojq.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFyYndxdHVkdWJ0eXh1ZmJqb2pxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI5MTk3MjcsImV4cCI6MjEwODQ5NTcyN30.cOkLai5YpcN2d_FOidjkwGKoAweXn3YAVoFA2ERW5QA';
+    const supabase = (typeof window !== 'undefined' && window.supabase)
+      ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+          auth: { persistSession: true, autoRefreshToken: true }
+        })
+      : null;
+
+    function normalizeStudentEmail(identifier) {
+      const clean = (identifier || '').trim().toLowerCase();
+      if (clean.includes('@')) return clean;
+      return `${clean.replace(/[^a-z0-9_-]/g, '')}@qartix.campus`;
+    }
+
+    function normalizeDriverEmail(driverId) {
+      const clean = (driverId || '').trim().toLowerCase();
+      if (clean.includes('@')) return clean;
+      return `${clean.replace(/[^a-z0-9_-]/g, '')}@driver.qartix.campus`;
+    }
+
+    function normalizeDriverPin(pin) {
+      const p = (pin || '').trim();
+      if (p === '4021') return 'driverPin4021';
+      if (p.length < 6) return `${p}_qartix_driver`;
+      return p;
+    }
 
     // =========================================================
     // 1. AUTHPAGE COMPONENT
@@ -124,9 +153,12 @@ function AuthPage({ onAuthenticate = () => {} }) {
     setErrorMsg('');
   };
 
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // Submit Handler
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    setErrorMsg('');
 
     if (role === 'student') {
       const id = formData.identifier.trim();
@@ -151,17 +183,77 @@ function AuthPage({ onAuthenticate = () => {} }) {
         }
       }
 
-      onAuthenticate({
-        role: 'student',
-        user: {
-          id: id.toUpperCase(),
-          fullName: formData.fullName.trim() || 'Student User',
-          residencyStatus: formData.residencyStatus || 'Hostler',
-          hostelBlock: formData.residencyStatus === 'Hostler' ? 'Hostel Resident' : 'Day Scholar',
-          phone: formData.phone.trim() || '+91 98765 43210',
-          mode,
-        },
-      });
+      setIsSubmitting(true);
+      try {
+        if (supabase) {
+          const email = normalizeStudentEmail(id);
+          let authUser = null;
+          let profile = null;
+
+          if (mode === 'signup') {
+            const { data, error } = await supabase.auth.signUp({
+              email,
+              password: pwd,
+              options: {
+                data: {
+                  role: 'student',
+                  fullName: formData.fullName.trim(),
+                  phone: formData.phone.trim(),
+                  studentId: id.toUpperCase(),
+                  residencyStatus: formData.residencyStatus,
+                },
+              },
+            });
+            if (error) throw new Error(error.message);
+            authUser = data.user;
+          } else {
+            const { data, error } = await supabase.auth.signInWithPassword({
+              email,
+              password: pwd,
+            });
+            if (error || !data?.user) throw new Error('Invalid credentials. Please verify your details.');
+            authUser = data.user;
+          }
+
+          if (authUser) {
+            const { data: p } = await supabase.from('profiles').select('*').eq('id', authUser.id).single();
+            profile = p;
+          }
+
+          const verifiedRole = profile?.role || 'student';
+          onAuthenticate({
+            role: verifiedRole,
+            user: {
+              id: profile?.id || id.toUpperCase(),
+              email: authUser?.email || email,
+              fullName: profile?.full_name || formData.fullName.trim() || 'Student User',
+              residencyStatus: profile?.residency_status || formData.residencyStatus || 'Hostler',
+              hostelBlock: profile?.hostel_block || (formData.residencyStatus === 'Hostler' ? 'Hostel Resident' : 'Day Scholar'),
+              phone: profile?.phone || formData.phone.trim() || '+91 98765 43210',
+              studentId: profile?.student_id || id.toUpperCase(),
+              mode,
+            },
+          });
+          return;
+        }
+
+        // Fallback if offline
+        onAuthenticate({
+          role: 'student',
+          user: {
+            id: id.toUpperCase(),
+            fullName: formData.fullName.trim() || 'Student User',
+            residencyStatus: formData.residencyStatus || 'Hostler',
+            hostelBlock: formData.residencyStatus === 'Hostler' ? 'Hostel Resident' : 'Day Scholar',
+            phone: formData.phone.trim() || '+91 98765 43210',
+            mode,
+          },
+        });
+      } catch (err) {
+        setErrorMsg(err.message || 'Invalid credentials. Please verify your details.');
+      } finally {
+        setIsSubmitting(false);
+      }
     } else {
       // Driver
       const cartOrDriver = formData.driverId.trim();
@@ -186,16 +278,79 @@ function AuthPage({ onAuthenticate = () => {} }) {
         }
       }
 
-      onAuthenticate({
-        role: 'driver',
-        user: {
-          id: cartOrDriver.toUpperCase(),
-          cartNumber: cartOrDriver.toUpperCase().includes('CART') ? cartOrDriver.toUpperCase() : `CART-${cartOrDriver}`,
-          fullName: formData.fullName.trim() || 'Campus Operator',
-          phone: formData.phone.trim() || '+91 98765 43210',
-          mode,
-        },
-      });
+      setIsSubmitting(true);
+      try {
+        if (supabase) {
+          const email = normalizeDriverEmail(cartOrDriver);
+          const pwd = normalizeDriverPin(pin);
+          let authUser = null;
+          let profile = null;
+
+          if (mode === 'signup') {
+            const { data, error } = await supabase.auth.signUp({
+              email,
+              password: pwd,
+              options: {
+                data: {
+                  role: 'driver',
+                  fullName: formData.fullName.trim(),
+                  phone: formData.phone.trim(),
+                  driverId: cartOrDriver.toUpperCase(),
+                },
+              },
+            });
+            if (error) throw new Error(error.message);
+            authUser = data.user;
+          } else {
+            const { data, error } = await supabase.auth.signInWithPassword({
+              email,
+              password: pwd,
+            });
+            if (error || !data?.user) throw new Error('Invalid credentials. Please verify your details.');
+            authUser = data.user;
+          }
+
+          if (authUser) {
+            const { data: p } = await supabase.from('profiles').select('*').eq('id', authUser.id).single();
+            profile = p;
+          }
+
+          if (profile?.role === 'driver' && !profile.driver_approved) {
+            throw new Error('Your driver account is pending Transport Office approval.');
+          }
+
+          const verifiedRole = profile?.role || 'driver';
+          onAuthenticate({
+            role: verifiedRole,
+            user: {
+              id: profile?.id || cartOrDriver.toUpperCase(),
+              cartNumber: cartOrDriver.toUpperCase().includes('CART') ? cartOrDriver.toUpperCase() : `CART-${cartOrDriver}`,
+              driverId: profile?.driver_id || cartOrDriver.toUpperCase(),
+              fullName: profile?.full_name || formData.fullName.trim() || 'Campus Operator',
+              phone: profile?.phone || formData.phone.trim() || '+91 98765 43210',
+              driverApproved: profile?.driver_approved,
+              mode,
+            },
+          });
+          return;
+        }
+
+        // Fallback
+        onAuthenticate({
+          role: 'driver',
+          user: {
+            id: cartOrDriver.toUpperCase(),
+            cartNumber: cartOrDriver.toUpperCase().includes('CART') ? cartOrDriver.toUpperCase() : `CART-${cartOrDriver}`,
+            fullName: formData.fullName.trim() || 'Campus Operator',
+            phone: formData.phone.trim() || '+91 98765 43210',
+            mode,
+          },
+        });
+      } catch (err) {
+        setErrorMsg(err.message || 'Invalid credentials. Please verify your details.');
+      } finally {
+        setIsSubmitting(false);
+      }
     }
   };
 
@@ -6034,14 +6189,769 @@ function StudentDashboard({
 }
 
     // =========================================================
+    // 3.5. ADMIN INTERFACE (TRANSPORT OFFICE)
+    // =========================================================
+
+function AdminInterface({ admin = { fullName: 'Transport Officer' }, onLogout = () => {} }) {
+  const [activeTab, setActiveTab] = useState('passes'); // 'passes' | 'drivers' | 'fleet'
+  const [passRequests, setPassRequests] = useState([]);
+  const [drivers, setDrivers] = useState([]);
+  const [carts, setCarts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [actionMsg, setActionMsg] = useState('');
+  const [selectedDoc, setSelectedDoc] = useState(null);
+
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      if (supabase) {
+        const { data: passes } = await supabase.from('pass_requests').select('*').order('created_at', { ascending: false });
+        if (passes) setPassRequests(passes);
+
+        const { data: drvs } = await supabase.from('profiles').select('*').eq('role', 'driver').order('created_at', { ascending: false });
+        if (drvs) setDrivers(drvs);
+
+        const { data: crts } = await supabase.from('carts').select('*').order('cart_number');
+        if (crts) setCarts(crts);
+      }
+    } catch (e) {
+      console.error('Error loading admin data:', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const showNotification = (msg) => {
+    setActionMsg(msg);
+    setTimeout(() => setActionMsg(''), 4000);
+  };
+
+  const handleReviewPass = async (requestId, newStatus) => {
+    try {
+      if (supabase) {
+        const { error } = await supabase.from('pass_requests').update({
+          status: newStatus,
+          reviewed_at: new Date().toISOString(),
+          admin_notes: newStatus === 'approved' ? 'Approved by Transport Office' : 'Rejected - please provide updated documentation.',
+        }).eq('id', requestId);
+        if (error) throw error;
+      }
+      setPassRequests((prev) => prev.map((p) => (p.id === requestId ? { ...p, status: newStatus } : p)));
+      showNotification(`Pass ${requestId} has been marked as ${newStatus.toUpperCase()}.`);
+    } catch (err) {
+      alert('Failed to update pass request: ' + err.message);
+    }
+  };
+
+  const handleToggleDriverApproval = async (driverProfileId, currentStatus) => {
+    try {
+      const nextStatus = !currentStatus;
+      if (supabase) {
+        const { error } = await supabase.from('profiles').update({ driver_approved: nextStatus }).eq('id', driverProfileId);
+        if (error) throw error;
+      }
+      setDrivers((prev) => prev.map((d) => (d.id === driverProfileId ? { ...d, driver_approved: nextStatus } : d)));
+      showNotification(`Driver status updated to ${nextStatus ? 'APPROVED' : 'PENDING'}.`);
+    } catch (err) {
+      alert('Failed to update driver: ' + err.message);
+    }
+  };
+
+  const handleAssignCart = async (cartNumber, driverId) => {
+    try {
+      const assignedVal = driverId === '' ? null : driverId;
+      if (supabase) {
+        const { error } = await supabase.from('carts').update({ assigned_driver_id: assignedVal }).eq('cart_number', cartNumber);
+        if (error) throw error;
+      }
+      setCarts((prev) => prev.map((c) => (c.cart_number === cartNumber ? { ...c, assigned_driver_id: assignedVal } : c)));
+      showNotification(`Cart ${cartNumber} assignment updated.`);
+    } catch (err) {
+      alert('Failed to assign cart: ' + err.message);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        backgroundColor: '#13161B',
+        backgroundImage: 'radial-gradient(circle at 60% 30%, #242A34 0%, #13161B 80%)',
+        color: '#F4F5F7',
+        fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
+        paddingBottom: '60px',
+      }}
+    >
+      {actionMsg && (
+        <div
+          style={{
+            position: 'fixed',
+            top: '80px',
+            right: '24px',
+            zIndex: 9999,
+            background: '#1C2128',
+            color: '#10B981',
+            border: '1px solid #10B981',
+            borderRadius: '8px',
+            padding: '12px 20px',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+            fontSize: '13px',
+            fontWeight: 600,
+          }}
+        >
+          {actionMsg}
+        </div>
+      )}
+
+      <header
+        style={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 50,
+          height: '68px',
+          padding: '0 32px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          background: 'rgba(28, 33, 40, 0.92)',
+          backdropFilter: 'blur(16px)',
+          borderBottom: '1px solid rgba(255, 255, 255, 0.12)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <div
+            style={{
+              width: '36px',
+              height: '36px',
+              borderRadius: '8px',
+              background: '#13161B',
+              border: '1px solid rgba(255, 255, 255, 0.12)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#10B981',
+              fontWeight: 800,
+              fontSize: '18px',
+            }}
+          >
+            Q
+          </div>
+          <div>
+            <div style={{ fontSize: '15px', fontWeight: 700, letterSpacing: '0.02em', color: '#F4F5F7' }}>
+              QARTIX TRANSPORT OFFICE
+            </div>
+            <div style={{ fontSize: '11px', color: '#9CA3AF' }}>
+              Admin Dispatch & Fleet Verification Console
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <span
+            style={{
+              fontSize: '12px',
+              padding: '4px 10px',
+              borderRadius: '6px',
+              background: 'rgba(16, 185, 129, 0.15)',
+              color: '#10B981',
+              border: '1px solid rgba(16, 185, 129, 0.3)',
+              fontWeight: 600,
+            }}
+          >
+            TRANSPORT ADMIN
+          </span>
+          <button
+            onClick={onLogout}
+            style={{
+              background: 'rgba(239, 68, 68, 0.12)',
+              color: '#F87171',
+              border: '1px solid rgba(239, 68, 68, 0.25)',
+              padding: '6px 14px',
+              borderRadius: '6px',
+              fontSize: '12px',
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            Logout
+          </button>
+        </div>
+      </header>
+
+      <main style={{ maxWidth: '1280px', margin: '0 auto', padding: '32px 24px' }}>
+        <div
+          style={{
+            display: 'flex',
+            gap: '12px',
+            marginBottom: '28px',
+            borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+            paddingBottom: '14px',
+          }}
+        >
+          {[
+            { id: 'passes', label: `Pass Requests (${passRequests.filter((p) => p.status === 'pending').length} Pending)` },
+            { id: 'drivers', label: `Driver Accounts (${drivers.length})` },
+            { id: 'fleet', label: `EV Fleet Telemetry (${carts.length})` },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              style={{
+                background: activeTab === tab.id ? '#10B981' : 'rgba(255, 255, 255, 0.05)',
+                color: activeTab === tab.id ? '#04100C' : '#9CA3AF',
+                border: 'none',
+                padding: '10px 18px',
+                borderRadius: '8px',
+                fontSize: '13px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {loading ? (
+          <div style={{ textAlign: 'center', padding: '60px 0', color: '#9CA3AF' }}>
+            Loading Transport Office records from Supabase...
+          </div>
+        ) : null}
+
+        {!loading && activeTab === 'passes' && (
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h2 style={{ fontSize: '18px', fontWeight: 700 }}>Medical Mobility Pass Verification Queue</h2>
+              <button
+                onClick={loadData}
+                style={{
+                  background: 'rgba(255,255,255,0.06)',
+                  color: '#D1D5DB',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                }}
+              >
+                Refresh
+              </button>
+            </div>
+
+            {passRequests.length === 0 ? (
+              <div
+                style={{
+                  background: '#1C2128',
+                  borderRadius: '12px',
+                  padding: '40px',
+                  textAlign: 'center',
+                  color: '#9CA3AF',
+                }}
+              >
+                No mobility pass requests submitted yet.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                {passRequests.map((req) => (
+                  <div
+                    key={req.id}
+                    style={{
+                      background: '#1C2128',
+                      border: '1px solid rgba(255, 255, 255, 0.1)',
+                      borderRadius: '12px',
+                      padding: '20px 24px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '14px',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <span style={{ fontSize: '16px', fontWeight: 700, color: '#F4F5F7' }}>
+                            {req.student_name}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: '11px',
+                              fontFamily: 'JetBrains Mono, monospace',
+                              padding: '2px 8px',
+                              borderRadius: '4px',
+                              background: 'rgba(255,255,255,0.08)',
+                              color: '#9CA3AF',
+                            }}
+                          >
+                            {req.student_code}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: '11px',
+                              fontWeight: 700,
+                              padding: '2px 8px',
+                              borderRadius: '4px',
+                              textTransform: 'uppercase',
+                              background:
+                                req.status === 'approved'
+                                  ? 'rgba(16, 185, 129, 0.15)'
+                                  : req.status === 'rejected'
+                                  ? 'rgba(239, 68, 68, 0.15)'
+                                  : 'rgba(245, 158, 11, 0.15)',
+                              color:
+                                req.status === 'approved'
+                                  ? '#10B981'
+                                  : req.status === 'rejected'
+                                  ? '#F87171'
+                                  : '#FBBF24',
+                            }}
+                          >
+                            {req.status}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: '12px', color: '#9CA3AF', marginTop: '4px' }}>
+                          {req.residency_type} • Mobile: {req.mobile || 'N/A'} • Submitted:{' '}
+                          {new Date(req.created_at).toLocaleDateString()}
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        {req.status !== 'approved' && (
+                          <button
+                            onClick={() => handleReviewPass(req.id, 'approved')}
+                            style={{
+                              background: '#10B981',
+                              color: '#04100C',
+                              border: 'none',
+                              padding: '8px 16px',
+                              borderRadius: '6px',
+                              fontSize: '12px',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            Approve Pass
+                          </button>
+                        )}
+                        {req.status !== 'rejected' && (
+                          <button
+                            onClick={() => handleReviewPass(req.id, 'rejected')}
+                            style={{
+                              background: 'rgba(239, 68, 68, 0.15)',
+                              color: '#F87171',
+                              border: '1px solid rgba(239, 68, 68, 0.3)',
+                              padding: '8px 16px',
+                              borderRadius: '6px',
+                              fontSize: '12px',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            Reject
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                        gap: '12px',
+                        background: 'rgba(0, 0, 0, 0.25)',
+                        padding: '12px 16px',
+                        borderRadius: '8px',
+                        fontSize: '12px',
+                      }}
+                    >
+                      <div>
+                        <span style={{ color: '#9CA3AF' }}>Route: </span>
+                        <strong style={{ color: '#F4F5F7' }}>{req.route}</strong>
+                      </div>
+                      <div>
+                        <span style={{ color: '#9CA3AF' }}>Condition: </span>
+                        <strong style={{ color: '#F59E0B' }}>{req.medical_condition}</strong>
+                      </div>
+                      <div>
+                        <span style={{ color: '#9CA3AF' }}>Validity: </span>
+                        <strong style={{ color: '#F4F5F7' }}>
+                          {req.duration} ({req.validity_days} days)
+                        </strong>
+                      </div>
+                      <div>
+                        <span style={{ color: '#9CA3AF' }}>Time Slots: </span>
+                        <strong style={{ color: '#F4F5F7' }}>
+                          {Array.isArray(req.time_slots) ? req.time_slots.join(', ') : 'Daily Scheduled'}
+                        </strong>
+                      </div>
+                    </div>
+
+                    <div style={{ fontSize: '12px', color: '#D1D5DB' }}>
+                      <span style={{ color: '#9CA3AF' }}>Medical Reason: </span>
+                      {req.reason}
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginTop: '4px' }}>
+                      <span style={{ fontSize: '12px', color: '#9CA3AF' }}>Medical Document:</span>
+                      <span
+                        style={{
+                          fontSize: '12px',
+                          color: '#38BDF8',
+                          textDecoration: 'underline',
+                          cursor: 'pointer',
+                        }}
+                        onClick={() =>
+                          setSelectedDoc({
+                            name: req.certificate_name,
+                            url: req.certificate_url,
+                            size: req.certificate_size,
+                          })
+                        }
+                      >
+                        📄 {req.certificate_name || 'certificate.pdf'} ({req.certificate_size || 'Attached'})
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {!loading && activeTab === 'drivers' && (
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h2 style={{ fontSize: '18px', fontWeight: 700 }}>Driver Accounts & Clearance</h2>
+              <button
+                onClick={loadData}
+                style={{
+                  background: 'rgba(255,255,255,0.06)',
+                  color: '#D1D5DB',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                }}
+              >
+                Refresh
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {drivers.map((drv) => (
+                <div
+                  key={drv.id}
+                  style={{
+                    background: '#1C2128',
+                    border: '1px solid rgba(255, 255, 255, 0.1)',
+                    borderRadius: '10px',
+                    padding: '16px 20px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  }}
+                >
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <span style={{ fontSize: '15px', fontWeight: 700 }}>{drv.full_name || 'Driver'}</span>
+                      <span
+                        style={{
+                          fontSize: '11px',
+                          fontFamily: 'JetBrains Mono, monospace',
+                          padding: '2px 8px',
+                          borderRadius: '4px',
+                          background: 'rgba(255,255,255,0.08)',
+                          color: '#9CA3AF',
+                        }}
+                      >
+                        {drv.driver_id || 'CART-OPERATOR'}
+                      </span>
+                      <span
+                        style={{
+                          fontSize: '11px',
+                          padding: '2px 8px',
+                          borderRadius: '4px',
+                          fontWeight: 700,
+                          background: drv.driver_approved
+                            ? 'rgba(16, 185, 129, 0.15)'
+                            : 'rgba(245, 158, 11, 0.15)',
+                          color: drv.driver_approved ? '#10B981' : '#FBBF24',
+                        }}
+                      >
+                        {drv.driver_approved ? 'APPROVED' : 'PENDING CLEARANCE'}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '12px', color: '#9CA3AF', marginTop: '4px' }}>
+                      Email: {drv.email} • Mobile: {drv.phone || 'N/A'} • Status:{' '}
+                      {drv.is_online ? '🟢 Online' : '⚪ Offline'}
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => handleToggleDriverApproval(drv.id, drv.driver_approved)}
+                    style={{
+                      background: drv.driver_approved ? 'rgba(239, 68, 68, 0.15)' : '#10B981',
+                      color: drv.driver_approved ? '#F87171' : '#04100C',
+                      border: drv.driver_approved ? '1px solid rgba(239,68,68,0.3)' : 'none',
+                      padding: '8px 16px',
+                      borderRadius: '6px',
+                      fontSize: '12px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {drv.driver_approved ? 'Revoke Approval' : 'Approve Driver Account'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {!loading && activeTab === 'fleet' && (
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h2 style={{ fontSize: '18px', fontWeight: 700 }}>Campus EV Cart Fleet & Telemetry</h2>
+              <button
+                onClick={loadData}
+                style={{
+                  background: 'rgba(255,255,255,0.06)',
+                  color: '#D1D5DB',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                }}
+              >
+                Refresh
+              </button>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: '16px' }}>
+              {carts.map((c) => (
+                <div
+                  key={c.id}
+                  style={{
+                    background: '#1C2128',
+                    border: '1px solid rgba(255, 255, 255, 0.1)',
+                    borderRadius: '12px',
+                    padding: '20px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '14px',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span
+                        style={{
+                          width: '10px',
+                          height: '10px',
+                          borderRadius: '50%',
+                          background: c.status === 'online' ? '#10B981' : '#6B7280',
+                          boxShadow: c.status === 'online' ? '0 0 8px #10B981' : 'none',
+                        }}
+                      />
+                      <span style={{ fontSize: '16px', fontWeight: 700 }}>{c.cart_number}</span>
+                    </div>
+                    <span
+                      style={{
+                        fontSize: '11px',
+                        padding: '2px 8px',
+                        borderRadius: '4px',
+                        fontWeight: 600,
+                        background: 'rgba(255,255,255,0.08)',
+                        color: '#9CA3AF',
+                        textTransform: 'uppercase',
+                      }}
+                    >
+                      {c.status}
+                    </span>
+                  </div>
+
+                  <div style={{ fontSize: '12px', color: '#9CA3AF' }}>
+                    <div>
+                      Station: <strong style={{ color: '#F4F5F7' }}>{c.current_station}</strong>
+                    </div>
+                    <div style={{ marginTop: '4px' }}>
+                      Speed: <strong style={{ color: '#10B981' }}>{c.speed_kmh} km/h</strong> • Route:{' '}
+                      <strong style={{ color: '#F4F5F7' }}>{c.route_label}</strong>
+                    </div>
+                  </div>
+
+                  <div style={{ marginTop: '6px' }}>
+                    <label style={{ fontSize: '11px', color: '#9CA3AF', display: 'block', marginBottom: '4px' }}>
+                      Assigned Driver:
+                    </label>
+                    <select
+                      value={c.assigned_driver_id || ''}
+                      onChange={(e) => handleAssignCart(c.cart_number, e.target.value)}
+                      style={{
+                        width: '100%',
+                        background: '#13161B',
+                        border: '1px solid rgba(255, 255, 255, 0.15)',
+                        color: '#F4F5F7',
+                        padding: '8px 10px',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                      }}
+                    >
+                      <option value="">-- No Driver Assigned --</option>
+                      {drivers.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.full_name} ({d.driver_id || d.email})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </main>
+
+      {selectedDoc && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 10000,
+            background: 'rgba(0, 0, 0, 0.8)',
+            backdropFilter: 'blur(8px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px',
+          }}
+        >
+          <div
+            style={{
+              background: '#1C2128',
+              border: '1px solid rgba(255, 255, 255, 0.15)',
+              borderRadius: '12px',
+              maxWidth: '560px',
+              width: '100%',
+              padding: '24px',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 700 }}>Medical Certificate Document</h3>
+              <button
+                onClick={() => setSelectedDoc(null)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: '#9CA3AF',
+                  fontSize: '20px',
+                  cursor: 'pointer',
+                }}
+              >
+                ×
+              </button>
+            </div>
+            <div
+              style={{
+                background: '#13161B',
+                borderRadius: '8px',
+                padding: '24px',
+                textAlign: 'center',
+                marginBottom: '20px',
+                border: '1px dashed rgba(255,255,255,0.2)',
+              }}
+            >
+              <div style={{ fontSize: '36px', marginBottom: '12px' }}>📄</div>
+              <div style={{ fontSize: '14px', fontWeight: 600 }}>{selectedDoc.name}</div>
+              <div style={{ fontSize: '12px', color: '#9CA3AF', marginTop: '4px' }}>
+                Verified Orthopedic / Clinic Certificate ({selectedDoc.size || 'PDF Document'})
+              </div>
+              {selectedDoc.url && (
+                <div style={{ marginTop: '16px' }}>
+                  <a
+                    href={selectedDoc.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      display: 'inline-block',
+                      background: '#10B981',
+                      color: '#04100C',
+                      padding: '8px 16px',
+                      borderRadius: '6px',
+                      textDecoration: 'none',
+                      fontSize: '12px',
+                      fontWeight: 700,
+                    }}
+                  >
+                    Open Document in New Tab
+                  </a>
+                </div>
+              )}
+            </div>
+            <button
+              onClick={() => setSelectedDoc(null)}
+              style={{
+                width: '100%',
+                background: 'rgba(255, 255, 255, 0.08)',
+                color: '#F4F5F7',
+                border: 'none',
+                padding: '10px',
+                borderRadius: '6px',
+                fontSize: '13px',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Close Preview
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+    // =========================================================
     // 4. MAIN APP ROUTER
     // =========================================================
 
 function App() {
-  // Authentication State: null | { role: 'student' | 'driver', id, fullName, ... }
+  // Authentication State: null | { role: 'student' | 'driver' | 'admin', id, fullName, ... }
   const [currentUser, setCurrentUser] = useState(null);
   const [studentView, setStudentView] = useState('landing'); // 'landing' | 'dashboard'
   const [welcomeToast, setWelcomeToast] = useState(null);
+
+  // Restore Supabase session on initial mount
+  useEffect(() => {
+    if (!supabase) return;
+    let isMounted = true;
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!isMounted || !session?.user) return;
+      supabase.from('profiles').select('*').eq('id', session.user.id).single().then(({ data: profile }) => {
+        if (!isMounted || !profile) return;
+        setCurrentUser({
+          id: session.user.id,
+          email: session.user.email,
+          role: profile.role || 'student',
+          fullName: profile.full_name || 'Campus Rider',
+          phone: profile.phone || '',
+          studentId: profile.student_id || '',
+          driverId: profile.driver_id || '',
+          cartNumber: profile.driver_id || 'CART-04',
+          residencyStatus: profile.residency_status || 'Hostler',
+          hostelBlock: profile.hostel_block || 'Hostel Resident',
+          driverApproved: profile.driver_approved,
+        });
+      }).catch(() => {});
+    }).catch(() => {});
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Auto-dismiss welcome toast after 4 seconds
   useEffect(() => {
@@ -6063,7 +6973,9 @@ function App() {
 
     // Craft contextual welcome message
     let message = '';
-    if (role === 'student') {
+    if (role === 'admin') {
+      message = `Welcome to Transport Office Admin Console, ${user.fullName || 'Admin'}!`;
+    } else if (role === 'student') {
       const name = user.fullName || 'Student';
       if (user.mode === 'signup') {
         message = `Welcome to Qartix, ${name}! Your student account is ready.`;
@@ -6078,7 +6990,10 @@ function App() {
   };
 
   // Handle Logout from any interface
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    if (supabase) {
+      await supabase.auth.signOut().catch(() => {});
+    }
     setCurrentUser(null);
     setStudentView('landing');
     setWelcomeToast(null);
@@ -6185,7 +7100,15 @@ function App() {
         </div>
       ) : null}
 
-      {/* 2. Driver Interface */}
+      {/* 2. Admin Interface (Transport Office) */}
+      {currentUser.role === 'admin' && (
+        <AdminInterface
+          admin={currentUser}
+          onLogout={handleLogout}
+        />
+      )}
+
+      {/* 3. Driver Interface */}
       {currentUser.role === 'driver' && (
         <DriverInterface
           driver={currentUser}
@@ -6193,7 +7116,7 @@ function App() {
         />
       )}
 
-      {/* 3. Student Interface: Pass Builder & Today's Schedule Dashboard */}
+      {/* 4. Student Interface: Pass Builder & Today's Schedule Dashboard */}
       {currentUser.role === 'student' && studentView === 'dashboard' && (
         <StudentDashboard
           student={currentUser}
@@ -6202,7 +7125,7 @@ function App() {
         />
       )}
 
-      {/* 4. Default Student Interface: 3D WebGL Scroll Experience */}
+      {/* 5. Default Student Interface: 3D WebGL Scroll Experience */}
       {currentUser.role === 'student' && studentView === 'landing' && (
         <StudentLanding
           studentId={currentUser.id}

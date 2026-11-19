@@ -40,6 +40,7 @@ export default function StudentLanding({
   onBookPass = () => {},
   onLogout = () => {},
   studentId = 'STU-84920',
+  student = null,
 }) {
   // UI States
   const [activeSwatch, setActiveSwatch] = useState(PAINT_SWATCHES[0].hex);
@@ -1340,7 +1341,7 @@ export default function StudentLanding({
               }}
             />
             <span style={{ color: '#9CA3AF' }}>ID:</span>
-            <span style={{ color: '#F4F5F7', fontWeight: 700 }}>{studentId}</span>
+            <span style={{ color: '#F4F5F7', fontWeight: 700 }}>{student?.studentId || student?.loginIdentifier || studentId}</span>
           </div>
         </div>
 

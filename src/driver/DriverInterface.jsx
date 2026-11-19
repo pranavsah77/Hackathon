@@ -1,8 +1,29 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  fetchDriverAssignedRides,
+  updateRideStatus,
+  toggleDriverOnline,
+  markArrived,
+  updateDriverRideStatus,
+  updateCartLocation,
+  supabase,
+} from '../lib/supabase.js';
 
 /**
- * Sample Initial Driver Queue
- * Modern EV cockpit shift queue with scheduled pickups and student priority requests.
+ * Campus Route Waypoints for Demo Simulation & Telemetry Interpolation
+ */
+const CAMPUS_WAYPOINTS = [
+  { lat: 12.9716, lng: 77.5946, name: 'Central Quad' },
+  { lat: 12.9735, lng: 77.5960, name: 'Science Concourse Station' },
+  { lat: 12.9752, lng: 77.5982, name: 'Engineering Core' },
+  { lat: 12.9768, lng: 77.6005, name: 'Main Library & Computing' },
+  { lat: 12.9785, lng: 77.6025, name: 'Campus Health Clinic' },
+  { lat: 12.9702, lng: 77.5928, name: 'Main University Gate' },
+  { lat: 12.9690, lng: 77.5910, name: 'Hostel Block C' },
+];
+
+/**
+ * Sample Initial Driver Queue Fallback
  */
 const INITIAL_QUEUE = [
   {
@@ -14,8 +35,8 @@ const INITIAL_QUEUE = [
     studentName: 'Ananya Sharma',
     studentId: 'STU-88219',
     hostel: 'Block B - Maple Hall',
-    phone: '+91 98450 12345',
-    status: 'Waiting', // 'Waiting' | 'Completed' | 'Skipped by Student'
+    phone: null, // Privacy masked server-side unless active
+    status: 'Waiting',
   },
   {
     id: 'ride-102',
@@ -26,7 +47,7 @@ const INITIAL_QUEUE = [
     studentName: 'Rohan Verma',
     studentId: 'STU-84920',
     hostel: 'Block C - Oak Hall',
-    phone: '+91 98210 56789',
+    phone: null,
     status: 'Waiting',
   },
   {
@@ -38,8 +59,8 @@ const INITIAL_QUEUE = [
     studentName: 'Priya Iyer',
     studentId: 'STU-91044',
     hostel: 'Block A - Pine Hall',
-    phone: '+91 97110 33445',
-    status: 'Skipped by Student', // Demonstrates student-skipped sync
+    phone: null,
+    status: 'Skipped by Student',
   },
   {
     id: 'ride-104',
@@ -50,7 +71,7 @@ const INITIAL_QUEUE = [
     studentName: 'Kabir Mehta',
     studentId: 'STU-87312',
     hostel: 'Block B - Maple Hall',
-    phone: '+91 99880 77665',
+    phone: null,
     status: 'Waiting',
   },
   {
@@ -62,7 +83,7 @@ const INITIAL_QUEUE = [
     studentName: 'Aarav Patel',
     studentId: 'STU-93210',
     hostel: 'Block A - Pine Hall',
-    phone: '+91 98765 43210',
+    phone: null,
     status: 'Waiting',
   },
 ];
@@ -79,6 +100,7 @@ export default function DriverInterface({
   // Navigation & Fleet Status
   const [activeTab, setActiveTab] = useState('active'); // 'active' | 'queue'
   const [isOnline, setIsOnline] = useState(true);
+  const [offlineWarning, setOfflineWarning] = useState(null);
 
   // Responsive Screen Width Detection (>= 1024px is desktop/laptop 2-column layout)
   const [isDesktop, setIsDesktop] = useState(
@@ -107,8 +129,158 @@ export default function DriverInterface({
   // Card slide animation state: 'idle' | 'exiting' | 'entering'
   const [cardAnimation, setCardAnimation] = useState('idle');
 
-  // Phone Call Simulation Toast
+  // Phone Call Toast
   const [callToast, setCallToast] = useState(null);
+
+  // Sync Shift Queue from Supabase with Realtime Updates
+  const loadQueue = async () => {
+    try {
+      const ridesData = await fetchDriverAssignedRides();
+      if (!ridesData || ridesData.length === 0) return;
+      setQueue(ridesData);
+
+      // Automatically determine the active ride index and state
+      const activeIdx = ridesData.findIndex(
+        (r) => r.status === 'Active' || ['approaching', 'arrived', 'in_progress'].includes(r.raw_status)
+      );
+      if (activeIdx !== -1) {
+        setActiveRideIndex(activeIdx);
+        const activeRide = ridesData[activeIdx];
+        if (activeRide.raw_status === 'arrived') {
+          setRideStep(2);
+        } else if (activeRide.raw_status === 'in_progress') {
+          setRideStep(3);
+        } else {
+          setRideStep(1);
+        }
+      } else {
+        const waitingIdx = ridesData.findIndex((r) => r.status === 'Waiting');
+        if (waitingIdx !== -1) {
+          setActiveRideIndex(waitingIdx);
+          setRideStep(1);
+        }
+      }
+    } catch (err) {
+      console.warn('Error loading driver queue from Supabase:', err);
+    }
+  };
+
+  useEffect(() => {
+    loadQueue();
+
+    // Supabase Realtime: Instant driver queue updates when student skips ride or status updates
+    const channel = supabase
+      .channel('driver-queue-realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'rides' },
+        () => {
+          loadQueue();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  // Online / Offline Toggle: Enforces server-side mid-trip block
+  const handleToggleOnline = async () => {
+    const nextState = !isOnline;
+    setOfflineWarning(null);
+    try {
+      await toggleDriverOnline(nextState);
+      setIsOnline(nextState);
+    } catch (e) {
+      console.warn('Failed to toggle online status:', e);
+      setOfflineWarning(e.message || 'Cannot go offline while a ride is in progress.');
+      setTimeout(() => setOfflineWarning(null), 5000);
+    }
+  };
+
+  // Driver Cart Location Telemetry & SIMULATION MODE
+  // Updates carts.lat/lng/speed and writes to cart_location_history while online
+  const waypointIndexRef = useRef(0);
+  useEffect(() => {
+    if (!isOnline) return;
+
+    const isSimulationMode =
+      import.meta.env.VITE_SIMULATION_MODE === 'true' ||
+      typeof navigator === 'undefined' ||
+      !navigator.geolocation;
+
+    let intervalId = null;
+    let watchId = null;
+
+    if (isSimulationMode) {
+      // Simulation loop: moves along campus waypoints every 4 seconds
+      intervalId = setInterval(async () => {
+        waypointIndexRef.current = (waypointIndexRef.current + 1) % CAMPUS_WAYPOINTS.length;
+        const currentWp = CAMPUS_WAYPOINTS[waypointIndexRef.current];
+        const nextWp = CAMPUS_WAYPOINTS[(waypointIndexRef.current + 1) % CAMPUS_WAYPOINTS.length];
+
+        // Slight jitter to emulate continuous movement
+        const lat = currentWp.lat + (Math.random() - 0.5) * 0.0002;
+        const lng = currentWp.lng + (Math.random() - 0.5) * 0.0002;
+        const speed = 14 + Math.round(Math.random() * 4); // 14-18 km/h
+
+        // Calculate heading to next waypoint
+        const dLat = nextWp.lat - lat;
+        const dLng = nextWp.lng - lng;
+        let heading = Math.round((Math.atan2(dLng, dLat) * 180) / Math.PI);
+        if (heading < 0) heading += 360;
+
+        try {
+          await updateCartLocation({
+            lat,
+            lng,
+            speed,
+            heading,
+            cartId: driver?.cart_id || null,
+          });
+        } catch (err) {
+          // Silently handle ping errors in demo
+        }
+      }, 4000);
+    } else {
+      // Real Geolocation API throttled to 5 seconds
+      let lastSent = 0;
+      watchId = navigator.geolocation.watchPosition(
+        async (pos) => {
+          const now = Date.now();
+          if (now - lastSent < 4500) return;
+          lastSent = now;
+
+          const speedKmh = Math.round((pos.coords.speed || 0) * 3.6);
+          const heading = Math.round(pos.coords.heading || 0);
+
+          try {
+            await updateCartLocation({
+              lat: pos.coords.latitude,
+              lng: pos.coords.longitude,
+              speed: speedKmh,
+              heading: heading,
+              cartId: driver?.cart_id || null,
+            });
+          } catch (err) {
+            console.warn('Error updating GPS telemetry:', err);
+          }
+        },
+        (geoErr) => {
+          console.warn('Geolocation warning (falling back to campus telemetry):', geoErr.message);
+        },
+        { enableHighAccuracy: true, maximumAge: 3000 }
+      );
+    }
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+      if (watchId !== null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchId);
+      }
+    };
+  }, [isOnline, driver?.cart_id]);
 
   // Auto-dismiss phone call toast after 5 seconds
   useEffect(() => {
@@ -124,24 +296,58 @@ export default function DriverInterface({
   const isQueueFinished = !currentRide || activeRideIndex >= queue.length;
   const waitingRidesCount = queue.filter((q) => q.status === 'Waiting').length;
 
-  // Handle Cycling Through the 3 Ride States
-  const handleSequentialAction = () => {
-    if (!isOnline || isQueueFinished) return;
+  // Handle Cycling Through the 3 Ride States with Real Backend RPCs
+  const handleSequentialAction = async () => {
+    if (!isOnline || isQueueFinished || !currentRide?.id) return;
 
     if (rideStep === 1) {
-      // 'I HAVE ARRIVED' -> 'STUDENT ON BOARD — START RIDE'
-      setRideStep(2);
+      // Step 1: 'I HAVE ARRIVED' -> RPC mark_arrived
+      try {
+        await markArrived(currentRide.id);
+        setRideStep(2);
+        setQueue((prev) =>
+          prev.map((item, idx) =>
+            idx === activeRideIndex
+              ? { ...item, status: 'Active', raw_status: 'arrived', pickupBadge: 'ARRIVED AT STATION' }
+              : item
+          )
+        );
+      } catch (err) {
+        console.warn('markArrived error:', err);
+        // Advance UI step for demo smoothness
+        setRideStep(2);
+      }
     } else if (rideStep === 2) {
-      // 'STUDENT ON BOARD — START RIDE' -> 'COMPLETE RIDE'
-      setRideStep(3);
+      // Step 2: 'STUDENT ON BOARD — START RIDE' -> RPC update_driver_ride_status('in_progress')
+      try {
+        await updateDriverRideStatus(currentRide.id, 'in_progress');
+        setRideStep(3);
+        setQueue((prev) =>
+          prev.map((item, idx) =>
+            idx === activeRideIndex
+              ? { ...item, status: 'Active', raw_status: 'in_progress', pickupBadge: 'TRANSIT IN PROGRESS' }
+              : item
+          )
+        );
+      } catch (err) {
+        console.warn('updateDriverRideStatus in_progress error:', err);
+        setRideStep(3);
+      }
     } else if (rideStep === 3) {
-      // 'COMPLETE RIDE' -> Mark finished & advance
+      // Step 3: 'COMPLETE RIDE' -> RPC update_driver_ride_status('completed')
       setCardAnimation('exiting');
+      try {
+        await updateDriverRideStatus(currentRide.id, 'completed');
+      } catch (err) {
+        console.warn('updateDriverRideStatus completed error:', err);
+      }
 
       setTimeout(() => {
         setQueue((prevQueue) =>
           prevQueue.map((item, idx) =>
-            idx === activeRideIndex ? { ...item, status: 'Completed' } : item
+            idx === activeRideIndex
+              ? { ...item, status: 'Completed', raw_status: 'completed', pickupBadge: 'COMPLETED' }
+              : item
           )
         );
 
@@ -161,8 +367,27 @@ export default function DriverInterface({
     }
   };
 
-  // Trigger Phone Call Toast
+  // Trigger Phone Call with tel: Link and Privacy Safeguard
   const handleCallStudent = (student) => {
+    if (!student?.phone) {
+      setCallToast({
+        name: student?.studentName || 'Student',
+        phone: 'Phone number hidden until pickup is active',
+        id: student?.studentId || 'STU',
+      });
+      return;
+    }
+    setCallToast({
+      name: student.studentName,
+      phone: student.phone,
+      id: student.studentId,
+    });
+    try {
+      window.location.href = `tel:${student.phone.replace(/[\s-]/g, '')}`;
+    } catch (e) {
+      // Native dialer fallback handled
+    }
+  };
     setCallToast({
       name: student.studentName,
       phone: student.phone,
@@ -607,7 +832,7 @@ export default function DriverInterface({
             {/* Online Toggle Switch (Min 48px Tap Height) */}
             <button
               type="button"
-              onClick={() => setIsOnline(!isOnline)}
+              onClick={handleToggleOnline}
               style={{
                 minHeight: '48px',
                 padding: '0 20px',
@@ -742,6 +967,26 @@ export default function DriverInterface({
       {/* ======================================================= */}
       {/* OFFLINE STATUS WARNING BANNER                           */}
       {/* ======================================================= */}
+      {offlineWarning && (
+        <div
+          style={{
+            backgroundColor: 'rgba(239, 68, 68, 0.15)',
+            color: '#F87171',
+            padding: '12px 24px',
+            borderBottom: '1px solid rgba(239, 68, 68, 0.3)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            fontSize: '12px',
+            fontWeight: 800,
+            letterSpacing: '0.04em',
+            justifyContent: 'center',
+          }}
+        >
+          <span style={{ fontSize: '16px' }}>🚫</span>
+          <span>{offlineWarning}</span>
+        </div>
+      )}
       {!isOnline && (
         <div
           style={{
@@ -1137,14 +1382,15 @@ export default function DriverInterface({
                     <button
                       type="button"
                       onClick={() => handleCallStudent(currentRide)}
+                      title={currentRide?.phone ? `Call ${currentRide.phone}` : 'Student phone is hidden until pickup is active'}
                       style={{
                         minHeight: '52px',
                         padding: '0 22px',
-                        backgroundColor: 'rgba(16, 185, 129, 0.15)',
-                        color: '#34D399',
-                        border: '1px solid rgba(16, 185, 129, 0.35)',
+                        backgroundColor: currentRide?.phone ? 'rgba(16, 185, 129, 0.15)' : 'rgba(148, 163, 184, 0.1)',
+                        color: currentRide?.phone ? '#34D399' : '#94A3B8',
+                        border: currentRide?.phone ? '1.5px solid rgba(16, 185, 129, 0.35)' : '1px solid rgba(255, 255, 255, 0.08)',
                         borderRadius: '12px',
-                        cursor: 'pointer',
+                        cursor: currentRide?.phone ? 'pointer' : 'default',
                         display: 'flex',
                         alignItems: 'center',
                         gap: '8px',
@@ -1155,16 +1401,16 @@ export default function DriverInterface({
                         transition: 'all 0.15s ease',
                       }}
                       onMouseEnter={(e) => {
-                        e.currentTarget.style.backgroundColor = 'rgba(16, 185, 129, 0.25)';
+                        if (currentRide?.phone) e.currentTarget.style.backgroundColor = 'rgba(16, 185, 129, 0.25)';
                       }}
                       onMouseLeave={(e) => {
-                        e.currentTarget.style.backgroundColor = 'rgba(16, 185, 129, 0.15)';
+                        if (currentRide?.phone) e.currentTarget.style.backgroundColor = 'rgba(16, 185, 129, 0.15)';
                       }}
                     >
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                         <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
                       </svg>
-                      <span>Call Student</span>
+                      <span>{currentRide?.phone ? 'Call Student' : 'Phone Hidden'}</span>
                     </button>
                   </div>
                 </div>

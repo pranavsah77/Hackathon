@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { loginUser, signupUser } from '../lib/supabase.js';
 
 /**
  * AuthPage Component
@@ -11,6 +12,7 @@ export default function AuthPage({ onAuthenticate = () => {} }) {
   const [role, setRole] = useState('student');
   // Mode: 'login' | 'signup'
   const [mode, setMode] = useState('login');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Form State
   const [formData, setFormData] = useState({
@@ -26,12 +28,20 @@ export default function AuthPage({ onAuthenticate = () => {} }) {
   });
 
   const [errorMsg, setErrorMsg] = useState('');
+  const [pendingApprovalMsg, setPendingApprovalMsg] = useState('');
+
+  // Demo mode visibility: only display Quick Demo Fill if VITE_DEMO_MODE=true or NEXT_PUBLIC_DEMO_MODE=true
+  const showDemoMode =
+    (typeof import.meta !== 'undefined' &&
+      import.meta.env &&
+      (import.meta.env.VITE_DEMO_MODE === 'true' || import.meta.env.NEXT_PUBLIC_DEMO_MODE === 'true'));
 
   // Handle Input Change
   const handleChange = (e) => {
     const { name, value } = e.target;
     setFormData((prev) => ({ ...prev, [name]: value }));
     if (errorMsg) setErrorMsg('');
+    if (pendingApprovalMsg) setPendingApprovalMsg('');
   };
 
   // Quick Demo Fill Handler
@@ -59,23 +69,28 @@ export default function AuthPage({ onAuthenticate = () => {} }) {
       });
     }
     setErrorMsg('');
+    setPendingApprovalMsg('');
   };
 
   // Switch Role
   const handleRoleChange = (newRole) => {
     setRole(newRole);
     setErrorMsg('');
+    setPendingApprovalMsg('');
   };
 
   // Switch Mode
   const handleModeChange = (newMode) => {
     setMode(newMode);
     setErrorMsg('');
+    setPendingApprovalMsg('');
   };
 
   // Submit Handler
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    setErrorMsg('');
+    setPendingApprovalMsg('');
 
     if (role === 'student') {
       const id = formData.identifier.trim();
@@ -100,17 +115,47 @@ export default function AuthPage({ onAuthenticate = () => {} }) {
         }
       }
 
-      onAuthenticate({
-        role: 'student',
-        user: {
-          id: id.toUpperCase(),
-          fullName: formData.fullName.trim() || 'Student User',
-          residencyStatus: formData.residencyStatus || 'Hostler',
-          hostelBlock: formData.residencyStatus === 'Hostler' ? 'Hostel Resident' : 'Day Scholar',
-          phone: formData.phone.trim() || '+91 98765 43210',
-          mode,
-        },
-      });
+      setIsSubmitting(true);
+      try {
+        let authResult;
+        if (mode === 'signup') {
+          authResult = await signupUser({
+            role: 'student',
+            identifier: id,
+            password: pwd,
+            fullName: formData.fullName,
+            phone: formData.phone,
+            residencyStatus: formData.residencyStatus,
+          });
+        } else {
+          authResult = await loginUser({
+            role: 'student',
+            identifier: id,
+            password: pwd,
+          });
+        }
+
+        const { user, profile } = authResult;
+        const verifiedRole = profile?.role || 'student';
+
+        onAuthenticate({
+          role: verifiedRole,
+          user: {
+            id: profile?.id || user.id,
+            email: user.email,
+            fullName: profile?.full_name || formData.fullName.trim() || 'Student User',
+            residencyStatus: profile?.residency_status || formData.residencyStatus || 'Hostler',
+            hostelBlock: profile?.hostel_block || (formData.residencyStatus === 'Hostler' ? 'Hostel Resident' : 'Day Scholar'),
+            phone: profile?.phone || formData.phone.trim() || '+91 98765 43210',
+            studentId: profile?.student_id || id.toUpperCase(),
+            mode,
+          },
+        });
+      } catch (err) {
+        setErrorMsg(err.message || 'Invalid credentials. Please verify your details.');
+      } finally {
+        setIsSubmitting(false);
+      }
     } else {
       // Driver
       const cartOrDriver = formData.driverId.trim();
@@ -135,16 +180,60 @@ export default function AuthPage({ onAuthenticate = () => {} }) {
         }
       }
 
-      onAuthenticate({
-        role: 'driver',
-        user: {
-          id: cartOrDriver.toUpperCase(),
-          cartNumber: cartOrDriver.toUpperCase().includes('CART') ? cartOrDriver.toUpperCase() : `CART-${cartOrDriver}`,
-          fullName: formData.fullName.trim() || 'Campus Operator',
-          phone: formData.phone.trim() || '+91 98765 43210',
-          mode,
-        },
-      });
+      setIsSubmitting(true);
+      try {
+        let authResult;
+        if (mode === 'signup') {
+          authResult = await signupUser({
+            role: 'driver',
+            driverId: cartOrDriver,
+            pin,
+            fullName: formData.fullName,
+            phone: formData.phone,
+          });
+        } else {
+          authResult = await loginUser({
+            role: 'driver',
+            driverId: cartOrDriver,
+            pin,
+          });
+        }
+
+        if (authResult?.pendingApproval) {
+          setPendingApprovalMsg(
+            authResult.message ||
+              'Awaiting transport office approval. Your driver account is pending verification by the transport office.'
+          );
+          setMode('login');
+          return;
+        }
+
+        const { user, profile } = authResult;
+        const verifiedRole = profile?.role || 'driver';
+
+        onAuthenticate({
+          role: verifiedRole,
+          user: {
+            id: profile?.id || user.id,
+            cartNumber: cartOrDriver.toUpperCase().includes('CART') ? cartOrDriver.toUpperCase() : `CART-${cartOrDriver}`,
+            driverId: profile?.login_identifier || profile?.driver_id || cartOrDriver.toUpperCase(),
+            fullName: profile?.full_name || formData.fullName.trim() || 'Campus Operator',
+            phone: profile?.phone || formData.phone.trim() || '+91 98765 43210',
+            driverApproved: profile?.status === 'active' || profile?.driver_approved === true,
+            mode,
+          },
+        });
+      } catch (err) {
+        if (err.pendingApproval || err.message?.includes('Awaiting transport office approval')) {
+          setPendingApprovalMsg(
+            'Awaiting transport office approval. Your driver account is pending verification by the transport office.'
+          );
+        } else {
+          setErrorMsg(err.message || 'Invalid credentials. Please verify your details.');
+        }
+      } finally {
+        setIsSubmitting(false);
+      }
     }
   };
 
@@ -385,6 +474,36 @@ export default function AuthPage({ onAuthenticate = () => {} }) {
               <line x1="12" y1="16" x2="12.01" y2="16" />
             </svg>
             <span>{errorMsg}</span>
+          </div>
+        )}
+
+        {/* Pending Approval Alert */}
+        {pendingApprovalMsg && (
+          <div
+            style={{
+              padding: '12px 14px',
+              background: 'rgba(245, 158, 11, 0.12)',
+              border: '1px solid #F59E0B',
+              borderRadius: '8px',
+              color: '#FBBF24',
+              fontSize: '12px',
+              fontWeight: 600,
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: '10px',
+              lineHeight: 1.4,
+            }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: '1px' }}>
+              <circle cx="12" cy="12" r="10" />
+              <polyline points="12 6 12 12 16 14" />
+            </svg>
+            <div>
+              <div style={{ fontWeight: 700, color: '#FCD34D', marginBottom: '2px' }}>Awaiting Transport Office Approval</div>
+              <div style={{ fontSize: '11px', color: 'rgba(253, 230, 138, 0.9)' }}>
+                {pendingApprovalMsg}
+              </div>
+            </div>
           </div>
         )}
 
@@ -660,11 +779,12 @@ export default function AuthPage({ onAuthenticate = () => {} }) {
           {/* 4. Primary CTA Button in #10B981 Electric Emerald */}
           <button
             type="submit"
+            disabled={isSubmitting}
             style={{
               marginTop: '8px',
               width: '100%',
               padding: '13px 20px',
-              background: '#10B981',
+              background: isSubmitting ? '#059669' : '#10B981',
               color: '#0B1116',
               border: '1px solid #10B981',
               boxShadow: '0 4px 14px rgba(16, 185, 129, 0.25), 3px 3px 0px #0D1013',
@@ -672,32 +792,39 @@ export default function AuthPage({ onAuthenticate = () => {} }) {
               fontSize: '13px',
               fontWeight: 900,
               letterSpacing: '0.06em',
-              cursor: 'pointer',
+              cursor: isSubmitting ? 'not-allowed' : 'pointer',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               gap: '8px',
               transition: 'all 0.15s ease',
+              opacity: isSubmitting ? 0.8 : 1,
             }}
             onMouseEnter={(e) => {
+              if (isSubmitting) return;
               e.currentTarget.style.background = '#34D399';
               e.currentTarget.style.boxShadow = '0 6px 20px rgba(16, 185, 129, 0.4), 3px 3px 0px #0D1013';
             }}
             onMouseLeave={(e) => {
+              if (isSubmitting) return;
               e.currentTarget.style.background = '#10B981';
               e.currentTarget.style.boxShadow = '0 4px 14px rgba(16, 185, 129, 0.25), 3px 3px 0px #0D1013';
             }}
             onMouseDown={(e) => {
+              if (isSubmitting) return;
               e.currentTarget.style.transform = 'translate(2px, 2px)';
               e.currentTarget.style.boxShadow = '1px 1px 0px #0D1013';
             }}
             onMouseUp={(e) => {
+              if (isSubmitting) return;
               e.currentTarget.style.transform = 'translate(0px, 0px)';
               e.currentTarget.style.boxShadow = '0 4px 14px rgba(16, 185, 129, 0.25), 3px 3px 0px #0D1013';
             }}
           >
             <span>
-              {role === 'student'
+              {isSubmitting
+                ? 'Connecting to Qartix...'
+                : role === 'student'
                 ? mode === 'login'
                   ? 'Continue as Student →'
                   : 'Create Student Account →'
@@ -707,33 +834,35 @@ export default function AuthPage({ onAuthenticate = () => {} }) {
             </span>
           </button>
 
-          {/* 5. Subtle "Quick Demo Fill" Button */}
-          <div style={{ display: 'flex', justifyContent: 'center', marginTop: '6px' }}>
-            <button
-              type="button"
-              onClick={handleQuickDemoFill}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '7px 12px',
-                background: '#13161B',
-                border: '1px dashed rgba(255, 255, 255, 0.25)',
-                borderRadius: '6px',
-                color: '#9CA3AF',
-                fontSize: '11px',
-                fontWeight: 700,
-                cursor: 'pointer',
-                transition: 'all 0.15s ease',
-              }}
-              title="Auto-fill sample credentials for quick evaluation"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#10B981" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
-              </svg>
-              <span>Quick Demo Fill</span>
-            </button>
-          </div>
+          {/* 5. Subtle "Quick Demo Fill" Button (Hidden in production unless VITE_DEMO_MODE=true) */}
+          {showDemoMode && (
+            <div style={{ display: 'flex', justifyContent: 'center', marginTop: '6px' }}>
+              <button
+                type="button"
+                onClick={handleQuickDemoFill}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '7px 12px',
+                  background: '#13161B',
+                  border: '1px dashed rgba(255, 255, 255, 0.25)',
+                  borderRadius: '6px',
+                  color: '#9CA3AF',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease',
+                }}
+                title="Auto-fill sample credentials for quick evaluation"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#10B981" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
+                </svg>
+                <span>Quick Demo Fill</span>
+              </button>
+            </div>
+          )}
         </form>
       </div>
     </div>
