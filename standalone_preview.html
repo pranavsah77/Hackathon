@@ -4768,10 +4768,29 @@ function StudentDashboard({
           }}
           className="w-full px-6 py-4 flex items-center justify-between"
         >
-          <div className="text-sm font-semibold tracking-wider text-[#F0F6FC]">
-            QARTIX
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onReturnTo3D}
+              className="text-sm font-semibold tracking-wider text-[#F0F6FC] hover:text-[#10B981] transition-colors"
+            >
+              QARTIX
+            </button>
           </div>
           <div className="flex items-center gap-4 text-xs">
+            <button
+              type="button"
+              onClick={onReturnTo3D}
+              className="text-[#8B949E] hover:text-[#10B981] transition-colors flex items-center gap-1.5"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                <line x1="12" y1="22.08" x2="12" y2="12" />
+              </svg>
+              <span>3D Cart View</span>
+            </button>
+            <span className="text-[#1E2631]">•</span>
             <span className="text-[#8B949E]">{studentName}</span>
             <span className="text-[#1E2631]">•</span>
             <button
@@ -6086,9 +6105,29 @@ function AdminInterface({ admin = { fullName: 'Transport Officer' }, onLogout = 
     // =========================================================
 
 function App() {
-  // Authentication State: null | { role: 'student' | 'driver' | 'admin', id, fullName, ... }
-  const [currentUser, setCurrentUser] = useState(null);
-  const [studentView, setStudentView] = useState('dashboard'); // 'dashboard' | 'landing'
+  // 1. Single source of truth for the active view:
+  // Exact values: 'auth' | 'student-landing' | 'student-dashboard' | 'driver' | 'admin'
+  const [currentView, setCurrentView] = useState(() => {
+    if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('qartix_session_active') === 'true') {
+      const savedView = sessionStorage.getItem('qartix_view');
+      if (savedView && ['auth', 'student-landing', 'student-dashboard', 'driver', 'admin'].includes(savedView)) {
+        return savedView;
+      }
+    }
+    return 'auth';
+  });
+
+  // User state: null on initial load when no active session exists
+  const [currentUser, setCurrentUser] = useState(() => {
+    if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('qartix_session_active') === 'true') {
+      try {
+        const stored = sessionStorage.getItem('qartix_user');
+        if (stored) return JSON.parse(stored);
+      } catch (e) {}
+    }
+    return null;
+  });
+
   const [welcomeToast, setWelcomeToast] = useState(null);
 
   // Restore Supabase session on initial mount ONLY if user actively logged in during this session
@@ -6096,6 +6135,7 @@ function App() {
     const isSessionActive = typeof sessionStorage !== 'undefined' && sessionStorage.getItem('qartix_session_active') === 'true';
     if (!isSessionActive) {
       setCurrentUser(null);
+      setCurrentView('auth');
       return;
     }
     if (!supabase) return;
@@ -6104,18 +6144,33 @@ function App() {
       if (!isMounted || !session?.user) return;
       supabase.from('profiles').select('*').eq('id', session.user.id).single().then(({ data: profile }) => {
         if (!isMounted || !profile) return;
-        setCurrentUser({
+        const restoredUser = {
           id: session.user.id,
           email: session.user.email,
           role: profile.role || 'student',
           fullName: profile.full_name || 'Campus Rider',
           phone: profile.phone || '',
-          studentId: profile.student_id || '',
-          driverId: profile.driver_id || '',
+          studentId: profile.student_id || profile.login_identifier || '',
+          driverId: profile.driver_id || profile.login_identifier || '',
           cartNumber: profile.driver_id || 'CART-04',
           residencyStatus: profile.residency_status || 'Hostler',
           hostelBlock: profile.hostel_block || 'Hostel Resident',
-          driverApproved: profile.driver_approved,
+          driverApproved: profile.status === 'active' || profile.driver_approved === true,
+          status: profile.status || 'active',
+        };
+        setCurrentUser(restoredUser);
+        if (typeof sessionStorage !== 'undefined') {
+          sessionStorage.setItem('qartix_user', JSON.stringify(restoredUser));
+        }
+        setCurrentView((prev) => {
+          if (prev === 'auth') {
+            const saved = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('qartix_view') : null;
+            if (saved && ['student-landing', 'student-dashboard', 'driver', 'admin'].includes(saved)) {
+              return saved;
+            }
+            return profile.role === 'driver' ? 'driver' : profile.role === 'admin' ? 'admin' : 'student-landing';
+          }
+          return prev;
         });
       }).catch(() => {});
     }).catch(() => {});
@@ -6134,49 +6189,76 @@ function App() {
     }
   }, [welcomeToast]);
 
-  // Handle successful login/signup from AuthPage
+  // 2. Fix Post-Login & Post-Signup Routing
   const handleAuthenticate = ({ role, user }) => {
-    if (typeof sessionStorage !== 'undefined') {
-      sessionStorage.setItem('qartix_session_active', 'true');
-    }
-    setCurrentUser({
+    const mergedUser = {
       role,
       ...user,
-    });
+    };
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem('qartix_session_active', 'true');
+      sessionStorage.setItem('qartix_user', JSON.stringify(mergedUser));
+    }
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('qartix_user', JSON.stringify(mergedUser));
+    }
+    setCurrentUser(mergedUser);
+
+    // Strict post-login view routing:
+    // When a Student logs in or signs up, ALWAYS set currentView = 'student-landing' first
+    // When a Driver logs in or signs up, set currentView = 'driver'
+    // When an Admin logs in, set currentView = 'admin'
     if (role === 'student') {
-      setStudentView('dashboard');
+      setCurrentView('student-landing');
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem('qartix_view', 'student-landing');
+      }
+    } else if (role === 'driver') {
+      setCurrentView('driver');
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem('qartix_view', 'driver');
+      }
+    } else if (role === 'admin') {
+      setCurrentView('admin');
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem('qartix_view', 'admin');
+      }
     } else {
-      setStudentView('landing');
+      setCurrentView('auth');
     }
 
-    // Craft contextual welcome message
+    // Contextual welcome toast
     let message = '';
     if (role === 'admin') {
-      message = `Welcome to Transport Office Admin Console, ${user.fullName || 'Admin'}!`;
+      message = `Welcome to Transport Office Admin Console, ${user?.fullName || 'Admin'}!`;
     } else if (role === 'student') {
-      const name = user.fullName || 'Student';
-      if (user.mode === 'signup') {
+      const name = user?.fullName || 'Student';
+      if (user?.mode === 'signup') {
         message = `Welcome to Qartix, ${name}! Your student account is ready.`;
       } else {
         message = `Welcome back, ${name}! Ready for your campus ride?`;
       }
     } else if (role === 'driver') {
-      const driverIdent = user.fullName || user.cartNumber || user.id || 'Operator';
+      const driverIdent = user?.fullName || user?.cartNumber || user?.id || 'Operator';
       message = `Welcome, Driver ${driverIdent}! Have a safe shift.`;
     }
     setWelcomeToast(message);
   };
 
-  // Handle Logout from any interface
+  // 3. Shared Full Logout Reset
   const handleLogout = async () => {
     if (typeof sessionStorage !== 'undefined') {
       sessionStorage.removeItem('qartix_session_active');
+      sessionStorage.removeItem('qartix_user');
+      sessionStorage.removeItem('qartix_view');
     }
     if (supabase) {
       await supabase.auth.signOut().catch(() => {});
     }
     try {
       localStorage.removeItem('supabase.auth.token');
+      localStorage.removeItem('qartix_user');
+      localStorage.removeItem('qartix_view');
       for (let i = localStorage.length - 1; i >= 0; i--) {
         const k = localStorage.key(i);
         if (k && (k.startsWith('sb-') || k.includes('auth'))) {
@@ -6184,18 +6266,39 @@ function App() {
         }
       }
     } catch (e) {}
+
+    // Reset user to null and force view back to 'auth'
     setCurrentUser(null);
-    setStudentView('dashboard');
+    setCurrentView('auth');
     setWelcomeToast(null);
   };
 
-  // 1. Initial Screen: AuthPage
-  if (!currentUser) {
+  // Navigation handlers between views
+  const handleOpenStudentDashboard = () => {
+    setCurrentView('student-dashboard');
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem('qartix_view', 'student-dashboard');
+    }
+  };
+
+  const handleReturnTo3D = () => {
+    setCurrentView('student-landing');
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem('qartix_view', 'student-landing');
+    }
+  };
+
+  // 1. Initial Screen: AuthPage if view is 'auth' or currentUser is null
+  if (currentView === 'auth' || !currentUser) {
     return <AuthPage onAuthenticate={handleAuthenticate} />;
   }
 
   // 2. Pending Driver Approval Protection Screen
-  if (currentUser.role === 'driver' && (!currentUser.driverApproved && currentUser.status === 'pending_approval')) {
+  if (
+    currentView === 'driver' &&
+    currentUser.role === 'driver' &&
+    (!currentUser.driverApproved && currentUser.status === 'pending_approval')
+  ) {
     return (
       <div
         style={{
@@ -6347,7 +6450,7 @@ function App() {
                 cursor: 'pointer',
               }}
             >
-              Return to Dashboard
+              Return to App
             </button>
             <button
               type="button"
@@ -6467,36 +6570,37 @@ function App() {
         </div>
       ) : null}
 
-      {/* 2. Admin Interface (Transport Office) */}
-      {currentUser.role === 'admin' && (
+      {/* Admin Interface */}
+      {currentView === 'admin' && currentUser.role === 'admin' && (
         <AdminInterface
           admin={currentUser}
           onLogout={handleLogout}
         />
       )}
 
-      {/* 3. Driver Interface */}
-      {currentUser.role === 'driver' && (
+      {/* Driver Interface */}
+      {currentView === 'driver' && currentUser.role === 'driver' && (
         <DriverInterface
           driver={currentUser}
           onLogout={handleLogout}
         />
       )}
 
-      {/* 4. Student Interface: Pass Builder & Today's Schedule Dashboard */}
-      {currentUser.role === 'student' && studentView === 'dashboard' && (
-        <StudentDashboard
+      {/* Student 3D Landing Experience View (Default view for Students) */}
+      {currentView === 'student-landing' && currentUser.role === 'student' && (
+        <StudentLanding
+          studentId={currentUser.studentId || currentUser.id}
           student={currentUser}
-          onReturnTo3D={() => setStudentView('landing')}
+          onBookPass={handleOpenStudentDashboard}
           onLogout={handleLogout}
         />
       )}
 
-      {/* 5. Default Student Interface: 3D WebGL Scroll Experience */}
-      {currentUser.role === 'student' && studentView === 'landing' && (
-        <StudentLanding
-          studentId={currentUser.id}
-          onBookPass={() => setStudentView('dashboard')}
+      {/* Student Monthly Pass & Schedule Dashboard View */}
+      {currentView === 'student-dashboard' && currentUser.role === 'student' && (
+        <StudentDashboard
+          student={currentUser}
+          onReturnTo3D={handleReturnTo3D}
           onLogout={handleLogout}
         />
       )}

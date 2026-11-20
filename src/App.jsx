@@ -8,13 +8,65 @@ import { useAuth } from './context/AuthContext.jsx';
 
 export default function App() {
   const { currentUser, role, status, isDriverApproved, isLoading, logout, refreshSession } = useAuth();
-  const [studentView, setStudentView] = useState('dashboard'); // 'dashboard' | 'landing'
+
+  // 1. Single source of truth for the active view:
+  // Exact values: 'auth' | 'student-landing' | 'student-dashboard' | 'driver' | 'admin'
+  const [currentView, setCurrentView] = useState(() => {
+    if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('qartix_session_active') === 'true') {
+      const savedView = sessionStorage.getItem('qartix_view');
+      if (savedView && ['auth', 'student-landing', 'student-dashboard', 'driver', 'admin'].includes(savedView)) {
+        return savedView;
+      }
+    }
+    return 'auth';
+  });
+
+  // Active user object: null on initial load if no active session
+  const [user, setUser] = useState(() => {
+    if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('qartix_session_active') === 'true') {
+      try {
+        const stored = sessionStorage.getItem('qartix_user');
+        if (stored) return JSON.parse(stored);
+      } catch (e) {}
+    }
+    return null;
+  });
+
   const [welcomeToast, setWelcomeToast] = useState(null);
   const [currentPath, setCurrentPath] = useState(() => {
     return typeof window !== 'undefined' ? window.location.pathname : '/';
   });
 
-  // Track browser history / URL path changes (e.g. back/forward button or pushState)
+  // Synchronize state when AuthContext loads or updates currentUser
+  useEffect(() => {
+    const isSessionActive =
+      typeof sessionStorage !== 'undefined' &&
+      sessionStorage.getItem('qartix_session_active') === 'true';
+
+    if (!isSessionActive) {
+      setUser(null);
+      setCurrentView('auth');
+      return;
+    }
+
+    if (currentUser) {
+      setUser((prev) => ({ ...prev, ...currentUser }));
+      setCurrentView((prev) => {
+        if (prev === 'auth') {
+          const savedView = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('qartix_view') : null;
+          if (savedView && ['student-landing', 'student-dashboard', 'driver', 'admin'].includes(savedView)) {
+            return savedView;
+          }
+          if (currentUser.role === 'driver') return 'driver';
+          if (currentUser.role === 'admin') return 'admin';
+          return 'student-landing';
+        }
+        return prev;
+      });
+    }
+  }, [currentUser]);
+
+  // Track browser history / URL path changes
   useEffect(() => {
     const handleLocationChange = () => {
       setCurrentPath(window.location.pathname);
@@ -48,60 +100,126 @@ export default function App() {
     }
   }, [welcomeToast]);
 
-  // Handle successful login/signup from AuthPage
-  const handleAuthenticate = ({ role: authRole, user }) => {
+  // 2. Fix Post-Login & Post-Signup Routing
+  const handleAuthenticate = ({ role: authRole, user: authUser }) => {
+    const mergedUser = {
+      role: authRole,
+      ...authUser,
+    };
+
     if (typeof sessionStorage !== 'undefined') {
       sessionStorage.setItem('qartix_session_active', 'true');
+      sessionStorage.setItem('qartix_user', JSON.stringify(mergedUser));
     }
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('qartix_user', JSON.stringify(mergedUser));
+    }
+
+    setUser(mergedUser);
+
+    // Strict routing enforcement:
+    // - When Student logs in or signs up: ALWAYS set currentView = 'student-landing' first
+    // - When Driver logs in or signs up: set currentView = 'driver'
+    // - When Admin logs in: set currentView = 'admin'
     if (authRole === 'student') {
-      setStudentView('dashboard');
+      setCurrentView('student-landing');
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem('qartix_view', 'student-landing');
+      }
+    } else if (authRole === 'driver') {
+      setCurrentView('driver');
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem('qartix_view', 'driver');
+      }
+    } else if (authRole === 'admin') {
+      setCurrentView('admin');
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem('qartix_view', 'admin');
+      }
     } else {
-      setStudentView('landing');
+      setCurrentView('auth');
     }
-    refreshSession();
+
+    if (refreshSession) {
+      refreshSession();
+    }
 
     // Craft contextual welcome message
     let message = '';
     if (authRole === 'admin') {
-      message = `Welcome to Transport Office Admin Console, ${user?.fullName || 'Admin'}!`;
+      message = `Welcome to Transport Office Admin Console, ${authUser?.fullName || 'Admin'}!`;
     } else if (authRole === 'student') {
-      const name = user?.fullName || 'Student';
-      if (user?.mode === 'signup') {
+      const name = authUser?.fullName || 'Student';
+      if (authUser?.mode === 'signup') {
         message = `Welcome to Qartix, ${name}! Your student account is ready.`;
       } else {
         message = `Welcome back, ${name}! Ready for your campus ride?`;
       }
     } else if (authRole === 'driver') {
-      const driverIdent = user?.fullName || user?.cartNumber || user?.driverId || 'Operator';
+      const driverIdent = authUser?.fullName || authUser?.cartNumber || authUser?.driverId || 'Operator';
       message = `Welcome, Driver ${driverIdent}! Have a safe shift.`;
     }
     setWelcomeToast(message);
   };
 
-  // Handle Logout from any interface
+  // 3. Shared Full Logout Reset
   const handleLogout = async () => {
+    // Clear active session storage keys
     if (typeof sessionStorage !== 'undefined') {
       sessionStorage.removeItem('qartix_session_active');
+      sessionStorage.removeItem('qartix_user');
+      sessionStorage.removeItem('qartix_view');
     }
+
+    // Clear localStorage session keys and supabase tokens
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem('qartix_user');
+      localStorage.removeItem('qartix_view');
+      try {
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+          const k = localStorage.key(i);
+          if (k && (k.startsWith('sb-') || k.includes('auth'))) {
+            localStorage.removeItem(k);
+          }
+        }
+      } catch (e) {}
+    }
+
     try {
-      await logout();
+      if (logout) {
+        await logout();
+      }
     } catch (e) {
       console.warn('Logout error:', e);
     }
-    try {
-      for (let i = localStorage.length - 1; i >= 0; i--) {
-        const k = localStorage.key(i);
-        if (k && (k.startsWith('sb-') || k.includes('auth'))) {
-          localStorage.removeItem(k);
-        }
-      }
-    } catch (e) {}
-    setStudentView('dashboard');
+
+    // Reset user state and force view back to 'auth'
+    setUser(null);
+    setCurrentView('auth');
     setWelcomeToast(null);
   };
 
-  // Session restoration loading spinner
-  if (isLoading) {
+  // Navigation handlers between views
+  const handleOpenStudentDashboard = () => {
+    setCurrentView('student-dashboard');
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem('qartix_view', 'student-dashboard');
+    }
+  };
+
+  const handleReturnTo3D = () => {
+    setCurrentView('student-landing');
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem('qartix_view', 'student-landing');
+    }
+  };
+
+  // Session restoration loading spinner (only if session active)
+  const isSessionActive =
+    typeof sessionStorage !== 'undefined' &&
+    sessionStorage.getItem('qartix_session_active') === 'true';
+
+  if (isLoading && isSessionActive) {
     return (
       <div
         style={{
@@ -131,13 +249,21 @@ export default function App() {
     );
   }
 
-  // 1. Initial Screen: AuthPage if no authenticated user
-  if (!currentUser) {
+  const activeUser = user || currentUser;
+
+  // 1. Initial Screen: AuthPage if view is 'auth' or active user is null
+  if (currentView === 'auth' || !activeUser) {
     return <AuthPage onAuthenticate={handleAuthenticate} />;
   }
 
   // 2. Pending Driver Approval Protection Screen
-  if (role === 'driver' && (!isDriverApproved && status === 'pending_approval')) {
+  const isDriver = activeUser.role === 'driver';
+  const isDriverPending =
+    isDriver &&
+    ((!activeUser.driverApproved && activeUser.status === 'pending_approval') ||
+      (!isDriverApproved && status === 'pending_approval'));
+
+  if (currentView === 'driver' && isDriverPending) {
     return (
       <div
         style={{
@@ -191,7 +317,7 @@ export default function App() {
             Awaiting Transport Office Approval
           </h2>
           <p style={{ fontSize: '13px', color: '#9CA3AF', lineHeight: 1.55, margin: '0 0 24px 0' }}>
-            Your driver account (<strong style={{ color: '#F4F5F7' }}>{currentUser.cartNumber || currentUser.driverId}</strong>) has been registered and is pending verification by the campus transport office. Driver Cockpit access will be unlocked once approved.
+            Your driver account (<strong style={{ color: '#F4F5F7' }}>{activeUser.cartNumber || activeUser.driverId}</strong>) has been registered and is pending verification by the campus transport office. Driver Cockpit access will be unlocked once approved.
           </p>
           <button
             type="button"
@@ -217,7 +343,7 @@ export default function App() {
 
   // 3. Admin Area Protection Screen (If visiting /admin as non-admin)
   const isAdminRoute = currentPath === '/admin' || currentPath.startsWith('/admin');
-  if (isAdminRoute && role !== 'admin') {
+  if (isAdminRoute && activeUser.role !== 'admin') {
     return (
       <div
         style={{
@@ -291,7 +417,7 @@ export default function App() {
           </h2>
 
           <p style={{ fontSize: '13px', color: '#9CA3AF', lineHeight: 1.6, margin: '0 0 20px 0' }}>
-            The <strong style={{ color: '#F4F5F7' }}>/admin</strong> console is restricted to university fleet administrators. Your current session is authenticated as <strong style={{ color: '#F4F5F7' }}>{currentUser.fullName || currentUser.email || currentUser.loginIdentifier}</strong> with role <span style={{ color: '#10B981', fontWeight: 700 }}>{String(role || 'STUDENT').toUpperCase()}</span>.
+            The <strong style={{ color: '#F4F5F7' }}>/admin</strong> console is restricted to university fleet administrators. Your current session is authenticated as <strong style={{ color: '#F4F5F7' }}>{activeUser.fullName || activeUser.email || activeUser.studentId || activeUser.driverId}</strong> with role <span style={{ color: '#10B981', fontWeight: 700 }}>{String(activeUser.role || 'STUDENT').toUpperCase()}</span>.
           </p>
 
           <div
@@ -329,7 +455,7 @@ export default function App() {
                 transition: 'all 0.15s ease',
               }}
             >
-              Return to Dashboard
+              Return to App
             </button>
             <button
               type="button"
@@ -450,37 +576,37 @@ export default function App() {
         </div>
       ) : null}
 
-      {/* 3. Protected View: Admin Console (Role: admin) */}
-      {role === 'admin' && (
+      {/* Admin Console View */}
+      {currentView === 'admin' && activeUser.role === 'admin' && (
         <AdminInterface
-          admin={currentUser}
+          admin={activeUser}
           onLogout={handleLogout}
         />
       )}
 
-      {/* 4. Protected View: Driver Cockpit (Role: driver, Status: active) */}
-      {role === 'driver' && isDriverApproved && (
+      {/* Driver Cockpit View */}
+      {currentView === 'driver' && activeUser.role === 'driver' && (
         <DriverInterface
-          driver={currentUser}
+          driver={activeUser}
           onLogout={handleLogout}
         />
       )}
 
-      {/* 5. Protected View: Student Pass Builder & Schedule Dashboard (Role: student) */}
-      {role === 'student' && studentView === 'dashboard' && (
-        <StudentDashboard
-          student={currentUser}
-          onReturnTo3D={() => setStudentView('landing')}
-          onLogout={handleLogout}
-        />
-      )}
-
-      {/* 6. Protected View: Student 3D Landing Experience (Role: student) */}
-      {role === 'student' && studentView === 'landing' && (
+      {/* Student 3D Landing Experience View (Default view for Students) */}
+      {currentView === 'student-landing' && activeUser.role === 'student' && (
         <StudentLanding
-          studentId={currentUser.studentId || currentUser.loginIdentifier || currentUser.id}
-          student={currentUser}
-          onBookPass={() => setStudentView('dashboard')}
+          studentId={activeUser.studentId || activeUser.loginIdentifier || activeUser.id}
+          student={activeUser}
+          onBookPass={handleOpenStudentDashboard}
+          onLogout={handleLogout}
+        />
+      )}
+
+      {/* Student Monthly Pass & Schedule Dashboard View */}
+      {currentView === 'student-dashboard' && activeUser.role === 'student' && (
+        <StudentDashboard
+          student={activeUser}
+          onReturnTo3D={handleReturnTo3D}
           onLogout={handleLogout}
         />
       )}
