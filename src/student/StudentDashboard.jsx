@@ -87,24 +87,12 @@ export default function StudentDashboard({
   const displayRoute = `${pickupLocation} → ${academicBlock}`;
   const durationObj = DURATIONS.find((d) => d.id === duration) || DURATIONS[1];
 
-  // Fetch real pass requests and update hasSubmittedPass if existing pass found
+  // Fetch real pass requests
   const loadPassRequests = async () => {
     try {
       const data = await fetchPassRequests(student?.id);
       if (data && data.length > 0) {
         setRequestsList(data);
-        const existing = data.find(
-          (r) =>
-            r.status === 'approved' ||
-            r.status === 'active' ||
-            r.status === 'pending'
-        );
-        if (existing) {
-          setHasSubmittedPass(true);
-          try {
-            localStorage.setItem(`qartix_pass_submitted_${studentKey}`, 'true');
-          } catch (e) {}
-        }
       }
     } catch (err) {
       console.warn('Could not fetch pass requests:', err);
@@ -645,6 +633,24 @@ export default function StudentDashboard({
                 <line x1="12" y1="22.08" x2="12" y2="12" />
               </svg>
               <span>3D Cart View</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                try {
+                  localStorage.removeItem(`qartix_pass_submitted_${studentKey}`);
+                } catch (e) {}
+                setHasSubmittedPass(false);
+              }}
+              style={{
+                backgroundColor: '#11161D',
+                border: '1px solid #1E2631',
+              }}
+              className="px-3.5 py-2 text-xs sm:text-sm font-medium text-[#8B949E] hover:text-[#10B981] rounded-lg transition-colors"
+              title="Return to Stage 1 Application"
+            >
+              Re-apply Pass
             </button>
 
             <button

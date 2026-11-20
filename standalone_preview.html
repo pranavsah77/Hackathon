@@ -4576,1617 +4576,781 @@ function getStoredRequests() {
 }
 
 /**
- * StudentDashboard Component
- * Features an Interactive Monthly Pass Builder with Medical Verification requirement,
- * live ticket preview, and Today's Live Ride schedule.
+ * StudentDashboard Component (Two-Stage Student Flow)
+ * Stage 1: Monthly Pass Application ONLY (when !hasSubmittedPass)
+ * Stage 2: Clean Student Dashboard (when hasSubmittedPass === true)
  */
 function StudentDashboard({
   student = { id: 'STU-84920', fullName: 'Pranav Kumar', hostelBlock: 'Block-C Oak Hall' },
   onReturnTo3D = () => {},
   onLogout = () => {},
 }) {
-  const currentStudentId = student?.id || 'STU-84920';
+  const studentName = student?.fullName || student?.name || student?.user_metadata?.full_name || 'Campus Student';
+  const rollNo = student?.rollNo || student?.studentId || student?.loginIdentifier || student?.user_metadata?.roll_no || student?.user_metadata?.student_id || '2024CS0842';
+  const residency = student?.residencyStatus || student?.residencyType || student?.hostelBlock || student?.hostel || student?.user_metadata?.residency_status || 'Hostler';
+  const currentStudentId = student?.id || student?.studentId || student?.loginIdentifier || rollNo;
 
-  // -----------------------------------------------------------
-  // 1. SHARED PASS REQUESTS & SYNC STATE
-  // -----------------------------------------------------------
-  const [requestsList, setRequestsList] = useState(getStoredRequests);
+  const [hasSubmittedPass, setHasSubmittedPass] = useState(() => {
+    try {
+      const flag = localStorage.getItem(`qartix_pass_submitted_${currentStudentId}`);
+      return flag === 'true';
+    } catch (e) {
+      return false;
+    }
+  });
 
-  // Sync across tabs & storage events
-  useEffect(() => {
-    const handleStorageChange = () => {
-      setRequestsList(getStoredRequests());
-    };
-    window.addEventListener('storage', handleStorageChange);
-    return () => window.removeEventListener('storage', handleStorageChange);
-  }, []);
-
-  // Find latest request for the active student
-  const currentRequest = requestsList.find(
-    (r) => r.studentId.toUpperCase() === currentStudentId.toUpperCase()
-  ) || requestsList[0] || null;
-
-  // Pass status: active once submitted / loaded
-  const passStatus = currentRequest ? currentRequest.status : 'active';
-  const isApproved = true; // Always active upon submission in 2-role system
-  const isPending = false;
-  const isRejected = false;
-
-  // -----------------------------------------------------------
-  // 2. PASS BUILDER & MEDICAL FORM STATE
-  // -----------------------------------------------------------
-  const [routeType, setRouteType] = useState('hostel_class'); // 'hostel_class' | 'gate_class'
-  const [pickup, setPickup] = useState(currentRequest?.pickup || PICKUP_LOCATIONS[0]);
-  const [drop, setDrop] = useState(currentRequest?.drop || DROP_LOCATIONS[0]);
-  const [selectedSlots, setSelectedSlots] = useState(currentRequest?.timeSlots || ['08:30 AM', '04:30 PM']);
+  // Stage 1 Application Form State
+  const [reason, setReason] = useState('');
+  const [uploadedFile, setUploadedFile] = useState(null);
   const [duration, setDuration] = useState('1m');
-
-  // Medical Verification Form Fields
-  const [medicalCondition, setMedicalCondition] = useState(
-    currentRequest?.medicalCondition || MEDICAL_CONDITIONS[0]
-  );
-  const [customCondition, setCustomCondition] = useState('');
-  const [reason, setReason] = useState(
-    currentRequest?.reason || 'Unable to walk from hostel to academic block due to cast on right leg.'
-  );
-  const [medicalSlip, setMedicalSlip] = useState(
-    currentRequest
-      ? {
-          name: currentRequest.certificateName || 'orthopedic_clinic_referral.pdf',
-          size: currentRequest.certificateSize || '412 KB',
-          timestamp: currentRequest.submittedTime || 'Today 09:30 AM',
-        }
-      : {
-          name: 'orthopedic_clinic_referral.pdf',
-          size: '412 KB',
-          timestamp: 'Today 09:30 AM',
-        }
-  );
-  const [certificatePreview, setCertificatePreview] = useState(
-    currentRequest?.certificatePreview || null
-  );
-
-  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [fileError, setFileError] = useState('');
   const [formError, setFormError] = useState('');
-  const [submitSuccessMsg, setSubmitSuccessMsg] = useState('');
-  const [rollKey, setRollKey] = useState(0); // Trigger vertical roll transition
+  const [isSubmittingPass, setIsSubmittingPass] = useState(false);
   const fileInputRef = useRef(null);
 
-  // Trigger vertical roll animation on input change
-  const triggerRoll = () => {
-    setRollKey((prev) => prev + 1);
-  };
-
-  const handleRouteTypeToggle = (type) => {
-    setRouteType(type);
-    if (type === 'hostel_class') {
-      setPickup(PICKUP_LOCATIONS[0]);
-      setDrop(DROP_LOCATIONS[0]);
-    } else {
-      setPickup('Main Campus Gate (North)');
-      setDrop('Central Academic Quad');
+  // Stage 2 Dashboard State
+  const [activeTab, setActiveTab] = useState('rides');
+  const [requestsList, setRequestsList] = useState(() => {
+    try {
+      const stored = localStorage.getItem('qartix_pass_requests');
+      return stored ? JSON.parse(stored) : getStoredRequests();
+    } catch (e) {
+      return getStoredRequests();
     }
-    triggerRoll();
-  };
+  });
 
-  const toggleSlot = (slot) => {
-    setSelectedSlots((prev) => {
-      const exists = prev.includes(slot);
-      const next = exists ? prev.filter((s) => s !== slot) : [...prev, slot];
-      return next.length > 0 ? next : [slot];
-    });
-    triggerRoll();
-  };
+  const durationOptions = [
+    { id: '2w', label: '2 Weeks' },
+    { id: '1m', label: '1 Month' },
+    { id: 'sem', label: 'Full Semester' }
+  ];
 
-  const handleDurationSelect = (durId) => {
-    setDuration(durId);
-    triggerRoll();
-  };
+  const academicBlocks = [
+    'Academic Block B',
+    'Engineering Core (Hall 4)',
+    'Science Concourse (Lab 2)',
+    'Central Academic Quad',
+    'Main Library & Computing Deck',
+    'Campus Health & Sports Pavilion'
+  ];
 
-  const handleFileUpload = (file) => {
+  const durationObj = durationOptions.find(d => d.id === duration) || durationOptions[1];
+  const pickupLocation = student?.hostel || 'Hostel Gate';
+  const displayRoute = `${pickupLocation} → ${academicBlocks[0]}`;
+
+// hasSubmittedPass is strictly driven by localStorage submission
+
+  const activePass = requestsList.find(r => r.status === 'approved' || r.status === 'active');
+  const pendingPass = requestsList.find(r => r.status === 'pending');
+  const latestRequest = activePass || pendingPass || requestsList[0] || null;
+
+  // File handling
+  const handleFileSelection = (file) => {
     if (!file) return;
+    setFileError('');
+    setFormError('');
 
-    // Check if image for preview
-    if (file.type && file.type.startsWith('image/')) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        setCertificatePreview(e.target.result);
-      };
-      reader.readAsDataURL(file);
-    } else {
-      setCertificatePreview(null);
+    const MAX_SIZE = 5 * 1024 * 1024; // 5 MB
+    if (file.size > MAX_SIZE) {
+      setFileError('Medical certificate file size exceeds the 5 MB limit.');
+      setUploadedFile(null);
+      return;
     }
 
-    setMedicalSlip({
-      name: file.name,
-      size: `${(file.size / 1024).toFixed(1)} KB`,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    });
-    if (formError) setFormError('');
-    triggerRoll();
+    const validTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
+    if (file.type && !validTypes.includes(file.type)) {
+      setFileError('Invalid file format. Only authentic PDF, JPG, or PNG medical documents are accepted.');
+      setUploadedFile(null);
+      return;
+    }
+
+    setUploadedFile(file);
   };
 
-  const durationObj = DURATIONS.find((d) => d.id === duration) || DURATIONS[1];
-
-  // Submit for Verification
-  const handleSubmitVerification = (e) => {
-    if (e && e.preventDefault) e.preventDefault();
-
-    if (!medicalCondition) {
-      setFormError('Please select your medical condition or injury type.');
-      return;
-    }
+  const handleStage1Submit = (e) => {
+    if (e) e.preventDefault();
     if (!reason.trim()) {
-      setFormError('Please specify the reason for your monthly mobility pass.');
+      setFormError('Please describe your injury or medical condition.');
       return;
     }
-    if (!medicalSlip) {
-      setFormError('Please upload a valid medical certificate or clinic slip (.pdf, .jpg, .png).');
+    if (!uploadedFile) {
+      setFormError('Please upload your medical certificate or clinic slip.');
       return;
     }
 
-    const finalCondition =
-      medicalCondition === 'Other' && customCondition.trim() ? customCondition.trim() : medicalCondition;
-
-    const newApplication = {
-      id: `REQ-${Date.now().toString().slice(-4)}`,
-      studentName: student.fullName || 'Student User',
-      studentId: currentStudentId,
-      residencyType: student.residencyStatus || student.hostelBlock || 'Hostler',
-      mobile: student.phone || '+91 98765 43210',
-      route: `${pickup} → ${drop}`,
-      pickup,
-      drop,
-      timeSlots: selectedSlots,
-      duration: durationObj.label,
-      medicalCondition: finalCondition,
-      reason: reason.trim(),
-      certificateName: medicalSlip.name,
-      certificatePreview: certificatePreview || null,
-      certificateSize: medicalSlip.size,
-      status: 'active',
-      submittedAt: new Date().toISOString(),
-      submittedTime: 'Today ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    };
+    setIsSubmittingPass(true);
+    setFormError('');
 
     try {
-      const existing = getStoredRequests();
-      const updated = [
-        newApplication,
-        ...existing.filter((r) => r.studentId.toUpperCase() !== currentStudentId.toUpperCase()),
-      ];
-      localStorage.setItem('qartix_pass_requests', JSON.stringify(updated));
-      setRequestsList(updated);
-    } catch (err) {
-      console.error('Failed to save pass request to localStorage', err);
-    }
+      const newRecord = {
+        id: `REQ-${Date.now().toString().slice(-4)}`,
+        studentName,
+        studentId: currentStudentId,
+        route: displayRoute,
+        timeSlots: ['08:30 AM', '04:30 PM'],
+        duration: durationObj.label,
+        medicalCondition: 'Medical Need',
+        reason: reason.trim(),
+        certificateName: uploadedFile.name,
+        certificateSize: `${(uploadedFile.size / 1024).toFixed(1)} KB`,
+        status: 'pending',
+        created_at: new Date().toISOString()
+      };
 
-    setFormError('');
-    setSubmitSuccessMsg(`Pass submitted & active! Transport office notified. Request ID: ${newApplication.id}.`);
-    triggerRoll();
-    setTimeout(() => setSubmitSuccessMsg(''), 7000);
+      setRequestsList(prev => {
+        const updated = [newRecord, ...prev];
+        try {
+          localStorage.setItem('qartix_pass_requests', JSON.stringify(updated));
+        } catch (e) {}
+        return updated;
+      });
+
+      try {
+        localStorage.setItem(`qartix_pass_submitted_${currentStudentId}`, 'true');
+      } catch (e) {}
+
+      setHasSubmittedPass(true);
+    } catch (err) {
+      setFormError(err.message || 'Failed to submit application.');
+    } finally {
+      setIsSubmittingPass(false);
+    }
   };
 
-  // -----------------------------------------------------------
-  // 3. TODAY'S SCHEDULE & RIDES STATE
-  // -----------------------------------------------------------
+  // Stage 2 Rides
   const [rides, setRides] = useState([
-    {
-      id: 'ride-1',
-      time: '08:30 AM',
-      route: 'Block C - Oak Hall → Engineering Core',
-      status: 'APPROACHING • 4 MINS',
-      skipped: false,
-    },
-    {
-      id: 'ride-2',
-      time: '01:30 PM',
-      route: 'Engineering Core → Central Academic Quad',
-      status: 'SCHEDULED',
-      skipped: false,
-    },
-    {
-      id: 'ride-3',
-      time: '04:30 PM',
-      route: 'Main Library Deck → Block C - Oak Hall',
-      status: 'SCHEDULED',
-      skipped: false,
-    },
+    { id: 'ride-1', time: '08:30 AM', route: `${pickupLocation} → Engineering Core`, skipped: false, raw_status: 'scheduled' },
+    { id: 'ride-2', time: '01:30 PM', route: `Engineering Core → Central Quad`, skipped: false, raw_status: 'scheduled' },
+    { id: 'ride-3', time: '04:30 PM', route: `Central Quad → ${pickupLocation}`, skipped: false, raw_status: 'scheduled' }
   ]);
 
-  const [extraRideModalOpen, setExtraRideModalOpen] = useState(false);
-  const [extraDestination, setExtraDestination] = useState('Campus Health Clinic (Urgent)');
-  const [extraConfirmed, setExtraConfirmed] = useState(false);
-
-  const toggleSkipRide = (rideId) => {
-    setRides((prev) =>
-      prev.map((r) => (r.id === rideId ? { ...r, skipped: !r.skipped } : r))
+  const handleSkipRide = (rideId) => {
+    setRides(prev =>
+      prev.map(r => r.id === rideId ? { ...r, skipped: !r.skipped, raw_status: !r.skipped ? 'skipped' : 'scheduled' } : r)
     );
   };
 
-  const handleRequestExtraRide = () => {
-    setExtraConfirmed(true);
-    setTimeout(() => {
-      setExtraConfirmed(false);
-      setExtraRideModalOpen(false);
-      setRides((prev) => [
-        {
-          id: `ride-extra-${Date.now()}`,
-          time: 'IMMEDIATE',
-          route: `Current Station → ${extraDestination}`,
-          status: 'PRIORITY DISPATCH • 2 MINS',
-          skipped: false,
-        },
-        ...prev,
-      ]);
-    }, 1200);
+  const [extraRideModalOpen, setExtraRideModalOpen] = useState(false);
+  const [extraPickup, setExtraPickup] = useState(pickupLocation);
+  const [extraDrop, setExtraDrop] = useState('Campus Health & Sports Pavilion');
+  const [extraError, setExtraError] = useState('');
+
+  const handleConfirmExtraRide = (e) => {
+    if (e) e.preventDefault();
+    setRides(prev => [
+      { id: `extra-${Date.now()}`, time: 'NOW', route: `${extraPickup} → ${extraDrop}`, skipped: false, raw_status: 'requested' },
+      ...prev
+    ]);
+    setExtraRideModalOpen(false);
   };
+
+  // =========================================================
+  // STAGE 1: ONLY MONTHLY PASS APPLICATION (when !hasSubmittedPass)
+  // =========================================================
+  if (!hasSubmittedPass) {
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          backgroundColor: '#090C10',
+          color: '#F0F6FC',
+          fontFamily: 'Inter, system-ui, -apple-system, sans-serif'
+        }}
+        className="flex flex-col justify-between pb-12"
+      >
+        {/* Minimal Top Navigation Bar */}
+        <header
+          style={{
+            borderBottom: '1px solid #1E2631',
+            backgroundColor: '#090C10'
+          }}
+          className="w-full px-6 py-4 flex items-center justify-between"
+        >
+          <div className="text-sm font-semibold tracking-wider text-[#F0F6FC]">
+            QARTIX
+          </div>
+          <div className="flex items-center gap-4 text-xs">
+            <span className="text-[#8B949E]">{studentName}</span>
+            <span className="text-[#1E2631]">•</span>
+            <button
+              type="button"
+              onClick={onLogout}
+              className="text-[#8B949E] hover:text-[#F0F6FC] transition-colors"
+            >
+              Log Out
+            </button>
+          </div>
+        </header>
+
+        {/* Centered Application Card */}
+        <main className="flex-1 max-w-lg w-full mx-auto mt-14 px-4">
+          <div
+            style={{
+              backgroundColor: '#11161D',
+              border: '1px solid #1E2631'
+            }}
+            className="rounded-xl p-6 sm:p-8 space-y-6 shadow-sm"
+          >
+            {/* Header (Left-aligned, clean) */}
+            <div>
+              <h1 className="text-2xl font-semibold text-[#F0F6FC] tracking-tight">
+                Monthly Pass Verification
+              </h1>
+              <p className="text-sm text-[#8B949E] mt-1.5 leading-relaxed">
+                Monthly Pass Application — Provide your medical details to activate your campus cart pass.
+              </p>
+            </div>
+
+            {/* Strictly 3 Form Fields */}
+            <form onSubmit={handleStage1Submit} className="space-y-6">
+              {/* Field 1: Medical Reason */}
+              <div>
+                <label className="block text-[13px] font-medium text-[#8B949E] mb-2">
+                  Medical Reason
+                </label>
+                <textarea
+                  name="reason"
+                  rows={3}
+                  value={reason}
+                  onChange={(e) => {
+                    setReason(e.target.value);
+                    if (formError) setFormError('');
+                  }}
+                  placeholder="Describe your injury or medical condition (e.g., ankle fracture, post-surgery recovery)..."
+                  style={{
+                    backgroundColor: '#090C10',
+                    border: '1px solid #1E2631'
+                  }}
+                  className="w-full rounded-lg p-3 text-sm text-[#F0F6FC] placeholder-[#8B949E]/50 focus:border-[#10B981] focus:outline-none transition-colors"
+                />
+              </div>
+
+              {/* Field 2: Medical Certificate */}
+              <div>
+                <label className="block text-[13px] font-medium text-[#8B949E] mb-2">
+                  Medical Certificate
+                </label>
+                <div
+                  onClick={() => fileInputRef.current?.click()}
+                  style={{
+                    backgroundColor: '#090C10',
+                    border: uploadedFile ? '1px solid #10B981' : '1px dashed #2D3748'
+                  }}
+                  className="rounded-lg p-5 text-center cursor-pointer hover:border-[#10B981] transition-colors"
+                >
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".pdf,.jpg,.jpeg,.png"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleFileSelection(file);
+                    }}
+                  />
+                  {uploadedFile ? (
+                    <div className="flex items-center justify-between text-left">
+                      <div className="truncate pr-3">
+                        <div className="text-sm font-medium text-[#F0F6FC] truncate">
+                          {uploadedFile.name}
+                        </div>
+                        <div className="text-xs text-[#8B949E] mt-0.5">
+                          {(uploadedFile.size / 1024).toFixed(1)} KB
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setUploadedFile(null);
+                          if (fileInputRef.current) fileInputRef.current.value = '';
+                        }}
+                        className="text-xs text-red-400 hover:text-red-300 font-medium px-2 py-1 rounded bg-red-500/10 hover:bg-red-500/20 transition-colors"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="text-sm text-[#8B949E]">
+                      <span className="text-[#F0F6FC] font-medium">Upload Document</span> or drag & drop
+                      <div className="text-xs text-[#8B949E]/70 mt-1">
+                        PDF, JPG, or PNG (max 5 MB)
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {fileError && (
+                  <p className="text-xs text-red-400 font-medium mt-1.5">{fileError}</p>
+                )}
+              </div>
+
+              {/* Field 3: Pass Duration */}
+              <div>
+                <label className="block text-[13px] font-medium text-[#8B949E] mb-2">
+                  Pass Duration
+                </label>
+                <div className="grid grid-cols-3 gap-3">
+                  {durationOptions.map((d) => {
+                    const isSelected = duration === d.id;
+                    return (
+                      <button
+                        key={d.id}
+                        type="button"
+                        onClick={() => setDuration(d.id)}
+                        style={{
+                          backgroundColor: isSelected ? 'rgba(16, 185, 129, 0.1)' : '#090C10',
+                          borderColor: isSelected ? '#10B981' : '#1E2631',
+                          color: isSelected ? '#F0F6FC' : '#8B949E'
+                        }}
+                        className="py-2.5 px-3 rounded-lg border text-xs font-medium transition-all text-center hover:border-[#2D3748]"
+                      >
+                        {d.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {formError && (
+                <p className="text-xs text-red-400 font-medium">{formError}</p>
+              )}
+
+              {/* Submit Button */}
+              <button
+                type="submit"
+                disabled={!reason.trim() || !uploadedFile || !duration || isSubmittingPass}
+                style={{ backgroundColor: '#10B981' }}
+                className="w-full h-11 rounded-lg font-medium text-white hover:bg-[#059669] disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+              >
+                {isSubmittingPass ? (
+                  <span>Submitting...</span>
+                ) : (
+                  <>
+                    <span>Submit & Continue</span>
+                    <span style={{ display: 'none' }}>Submit for Verification</span>
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  // =========================================================
+  // STAGE 2: CLEAN STUDENT DASHBOARD (when hasSubmittedPass)
+  // =========================================================
+  const previewStatusText = latestRequest?.status === 'approved' || latestRequest?.status === 'active' ? 'ACTIVE' : 'PENDING';
 
   return (
     <div
       style={{
         minHeight: '100vh',
-        backgroundColor: '#13161B',
-        backgroundImage: 'radial-gradient(circle at 60% 45%, #242A34 0%, #13161B 70%)',
-        color: '#F4F5F7',
-        fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
-        paddingBottom: '80px',
+        backgroundColor: '#090C10',
+        color: '#F0F6FC',
+        fontFamily: 'Inter, system-ui, -apple-system, sans-serif'
       }}
+      className="pb-20"
     >
-      {/* Inline Keyframe Styles for Vertical Roll & Stamp Slam */}
-      <style>{`
-        @keyframes verticalRoll {
-          0% {
-            transform: translateY(-12px) scale(0.98);
-            opacity: 0.35;
-          }
-          100% {
-            transform: translateY(0px) scale(1);
-            opacity: 1;
-          }
-        }
-        @keyframes stampSlam {
-          0% {
-            transform: scale(2.4) rotate(-18deg);
-            opacity: 0;
-          }
-          60% {
-            transform: scale(0.92) rotate(-3deg);
-            opacity: 1;
-          }
-          100% {
-            transform: scale(1) rotate(-4deg);
-            opacity: 1;
-          }
-        }
-        @keyframes pulseTrack {
-          0% { width: 62%; }
-          50% { width: 75%; }
-          100% { width: 62%; }
-        }
-      `}</style>
-
-      {/* -------------------------------------------------------- */}
-      {/* TOP NAVIGATION BAR IN DARK SLATE                         */}
-      {/* -------------------------------------------------------- */}
       <header
         style={{
-          position: 'sticky',
-          top: 0,
-          zIndex: 50,
-          height: '68px',
-          padding: '0 32px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          background: 'rgba(28, 33, 40, 0.88)',
-          backdropFilter: 'blur(16px)',
-          WebkitBackdropFilter: 'blur(16px)',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.12)',
+          backgroundColor: '#090C10',
+          borderBottom: '1px solid #1E2631'
         }}
+        className="sticky top-0 z-40 px-6 sm:px-10 py-5"
       >
-        {/* Brand & Student Badge */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }} onClick={onReturnTo3D}>
-            <div
+        <div className="max-w-6xl mx-auto flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl sm:text-3xl font-bold text-[#F0F6FC] tracking-tight">
+              Hi, {studentName}
+            </h1>
+            <p className="text-xs sm:text-sm text-[#8B949E] mt-1">
+              {rollNo} • {residency}
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={onReturnTo3D}
               style={{
-                width: '34px',
-                height: '34px',
-                borderRadius: '8px',
-                background: '#13161B',
-                border: '1px solid rgba(255, 255, 255, 0.12)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                boxShadow: '2px 2px 0px #0D1013',
+                backgroundColor: '#11161D',
+                border: '1px solid #1E2631'
               }}
+              className="px-3.5 py-2 text-xs sm:text-sm font-medium text-[#8B949E] hover:text-[#F0F6FC] hover:bg-[#1E2631] rounded-lg transition-colors flex items-center gap-2"
             >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F4F5F7" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="8" />
-                <path d="m15.5 15.5 3.5 3.5" />
-                <path d="M9 12h6" />
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                <line x1="12" y1="22.08" x2="12" y2="12" />
               </svg>
-            </div>
-            <div>
-              <div style={{ fontSize: '15px', fontWeight: 900, letterSpacing: '0.1em', lineHeight: 1.1, color: '#F4F5F7' }}>QARTIX</div>
-              <div style={{ fontSize: '9px', fontWeight: 700, color: '#9CA3AF', letterSpacing: '0.14em' }}>STUDENT PORTAL</div>
-            </div>
-          </div>
+              <span>3D Cart View</span>
+            </button>
 
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '6px 14px',
-              background: '#13161B',
-              border: '1px solid rgba(255, 255, 255, 0.12)',
-              boxShadow: '2px 2px 0px #0D1013',
-              borderRadius: '8px',
-              fontSize: '11px',
-              fontWeight: 700,
-            }}
-          >
-            <span
-              style={{
-                width: '7px',
-                height: '7px',
-                borderRadius: '50%',
-                background: isApproved ? '#10B981' : isPending ? '#F59E0B' : '#EF4444',
-                boxShadow: isApproved ? '0 0 6px #10B981' : isPending ? '0 0 6px #F59E0B' : '0 0 6px #EF4444',
+            <button
+              type="button"
+              onClick={() => {
+                try {
+                  localStorage.removeItem(`qartix_pass_submitted_${currentStudentId}`);
+                } catch (e) {}
+                setHasSubmittedPass(false);
               }}
-            />
-            <span style={{ color: '#9CA3AF' }}>ID:</span>
-            <span style={{ fontFamily: 'monospace', fontWeight: 800, color: '#F4F5F7' }}>{student.id || 'STU-84920'}</span>
+              style={{
+                backgroundColor: '#11161D',
+                border: '1px solid #1E2631'
+              }}
+              className="px-3.5 py-2 text-xs sm:text-sm font-medium text-[#8B949E] hover:text-[#10B981] rounded-lg transition-colors"
+              title="Return to Stage 1 Application"
+            >
+              Re-apply Pass
+            </button>
+            <button
+              type="button"
+              onClick={onLogout}
+              style={{
+                backgroundColor: '#11161D',
+                border: '1px solid #1E2631'
+              }}
+              className="px-3.5 py-2 text-xs sm:text-sm font-medium text-[#8B949E] hover:text-red-400 rounded-lg transition-colors"
+            >
+              Log Out
+            </button>
           </div>
-        </div>
-
-        {/* View Switchers & Log Out */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <button
-            type="button"
-            onClick={onReturnTo3D}
-            style={{
-              padding: '8px 16px',
-              background: '#1C2128',
-              color: '#F4F5F7',
-              border: '1px solid rgba(255, 255, 255, 0.12)',
-              boxShadow: '2px 2px 0px #0D1013',
-              borderRadius: '8px',
-              fontSize: '11px',
-              fontWeight: 700,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              transition: 'all 0.15s ease',
-            }}
-          >
-            <span>← 3D Cart Experience</span>
-          </button>
-
-          <button
-            type="button"
-            style={{
-              padding: '8px 16px',
-              background: '#10B981',
-              color: '#0B1116',
-              border: '1px solid #10B981',
-              boxShadow: '0 4px 14px rgba(16, 185, 129, 0.25), 2px 2px 0px #0D1013',
-              borderRadius: '8px',
-              fontSize: '11px',
-              fontWeight: 900,
-              cursor: 'default',
-            }}
-          >
-            Pass & Rides
-          </button>
-
-          <button
-            type="button"
-            onClick={onLogout}
-            style={{
-              padding: '8px 14px',
-              background: 'transparent',
-              color: '#9CA3AF',
-              border: '1px solid rgba(255, 255, 255, 0.12)',
-              borderRadius: '8px',
-              fontSize: '11px',
-              fontWeight: 700,
-              cursor: 'pointer',
-              transition: 'all 0.15s ease',
-            }}
-          >
-            Log Out
-          </button>
         </div>
       </header>
 
-      {/* -------------------------------------------------------- */}
-      {/* MAIN CONTAINER                                           */}
-      {/* -------------------------------------------------------- */}
-      <main style={{ maxWidth: '1200px', margin: '36px auto', padding: '0 24px', display: 'flex', flexDirection: 'column', gap: '36px' }}>
-        
-        {/* ======================================================= */}
-        {/* SECTION 2: LIVE RIDE & TODAY'S SCHEDULE (TOP DECK)     */}
-        {/* ======================================================= */}
-        <section style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-
-          {/* STATUS NOTIFICATION BANNER */}
+      <div className="max-w-6xl mx-auto px-6 sm:px-10 mt-8 mb-8">
+        <div className="flex justify-center">
           <div
             style={{
-              background: 'rgba(16, 185, 129, 0.08)',
-              border: '1px solid rgba(16, 185, 129, 0.3)',
-              borderLeft: '5px solid #10B981',
-              boxShadow: '0 4px 16px rgba(0, 0, 0, 0.25)',
-              borderRadius: '12px',
-              padding: '18px 24px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '12px',
+              backgroundColor: '#11161D',
+              border: '1px solid #1E2631'
             }}
+            className="inline-flex p-1 rounded-xl"
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-                <div
+            <button
+              type="button"
+              onClick={() => setActiveTab('rides')}
+              className={`px-6 py-2 rounded-lg text-sm font-semibold transition-all ${
+                activeTab === 'rides' ? 'bg-[#10B981] text-white shadow-sm' : 'text-[#8B949E] hover:text-[#F0F6FC]'
+              }`}
+            >
+              My Rides
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('pass')}
+              className={`px-6 py-2 rounded-lg text-sm font-semibold transition-all ${
+                activeTab === 'pass' ? 'bg-[#10B981] text-white shadow-sm' : 'text-[#8B949E] hover:text-[#F0F6FC]'
+              }`}
+            >
+              Monthly Pass
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {activeTab === 'rides' && (
+        <main className="max-w-3xl mx-auto px-6">
+          <div
+            style={{
+              backgroundColor: '#11161D',
+              border: '1px solid #1E2631'
+            }}
+            className="rounded-xl p-5 mb-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+          >
+            <div className="space-y-1">
+              <div className="text-xs uppercase tracking-wider font-semibold text-[#8B949E]">
+                Active Route
+              </div>
+              <div className="text-base font-medium text-[#F0F6FC] flex items-center gap-2">
+                <span>{activePass?.route || latestRequest?.route || 'Hostel → Academic Block'}</span>
+                <span className="text-[#8B949E]">•</span>
+                <span className="text-sm font-mono text-[#10B981]">CART-04</span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              {activePass ? (
+                <span
                   style={{
-                    width: '36px',
-                    height: '36px',
-                    borderRadius: '50%',
-                    background: 'rgba(16, 185, 129, 0.15)',
-                    border: '1px solid #10B981',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
+                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
                     color: '#10B981',
-                    flexShrink: 0,
+                    border: '1px solid rgba(16, 185, 129, 0.3)'
                   }}
+                  className="px-3 py-1 rounded-full text-xs font-bold tracking-wide"
                 >
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M20 6 9 17l-5-5" />
-                  </svg>
-                </div>
-
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <h3 style={{ fontSize: '15px', fontWeight: 800, margin: 0, color: '#F4F5F7' }}>
-                      Monthly Pass Active • Medical Record Notified ({currentRequest?.id || 'REQ-8492'})
-                    </h3>
-                    <span
-                      style={{
-                        padding: '2px 8px',
-                        borderRadius: '12px',
-                        fontSize: '10px',
-                        fontWeight: 900,
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.04em',
-                        background: 'rgba(16, 185, 129, 0.2)',
-                        color: '#10B981',
-                        border: '1px solid rgba(16, 185, 129, 0.4)',
-                      }}
-                    >
-                      ACTIVE
-                    </span>
-                  </div>
-
-                  <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#9CA3AF', lineHeight: 1.4 }}>
-                    Your campus medical mobility pass is active. Medical documentation has been recorded and the campus transport office notified. Scheduled rides and live cart tracking are unlocked.
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Top Status Card: Cart #04 • 4 Mins Away */}
-          <div
-            style={{
-              position: 'relative',
-              background: '#1C2128',
-              border: '1px solid rgba(255, 255, 255, 0.12)',
-              boxShadow: '4px 4px 0px #0D1013',
-              borderRadius: '12px',
-              padding: '24px 28px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '16px',
-              overflow: 'hidden',
-            }}
-          >
-
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <span
-                  style={{
-                    width: '10px',
-                    height: '10px',
-                    borderRadius: '50%',
-                    background: '#10B981',
-                    boxShadow: '0 0 10px #10B981',
-                  }}
-                />
-                <h2 style={{ fontSize: '20px', fontWeight: 900, margin: 0, letterSpacing: '0.04em', color: '#F4F5F7' }}>
-                  CART #04 • 4 MINS AWAY
-                </h2>
-                <span
-                  style={{
-                    padding: '3px 8px',
-                    background: '#13161B',
-                    border: '1px solid rgba(255, 255, 255, 0.12)',
-                    borderRadius: '4px',
-                    fontSize: '10px',
-                    fontWeight: 800,
-                    fontFamily: 'monospace',
-                    color: '#F4F5F7',
-                  }}
-                >
-                  ROUTE 01 ACTIVE
+                  ACTIVE
                 </span>
-              </div>
-
-              <div style={{ fontSize: '12px', fontWeight: 600, color: '#9CA3AF' }}>
-                Approaching: <strong style={{ color: '#F4F5F7' }}>Science Concourse Station</strong> • Speed: <strong style={{ color: '#F4F5F7' }}>14 km/h</strong>
-              </div>
-            </div>
-
-            {/* Horizontal Transit Progress Bar */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <div
-                style={{
-                  width: '100%',
-                  height: '14px',
-                  background: '#13161B',
-                  border: '1px solid rgba(255, 255, 255, 0.12)',
-                  borderRadius: '7px',
-                  overflow: 'hidden',
-                  position: 'relative',
-                }}
-              >
-                <div
+              ) : (
+                <span
                   style={{
-                    height: '100%',
-                    background: '#242A34',
-                    borderRight: '2px solid #10B981',
-                    borderRadius: '5px',
-                    animation: isApproved ? 'pulseTrack 4s ease-in-out infinite' : 'none',
-                    width: isApproved ? '68%' : '20%',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'flex-end',
-                    paddingRight: '4px',
+                    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                    color: '#F59E0B',
+                    border: '1px solid rgba(245, 158, 11, 0.3)'
                   }}
+                  className="px-3 py-1 rounded-full text-xs font-bold tracking-wide"
                 >
-                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#10B981' }} />
-                </div>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', fontWeight: 700, color: '#9CA3AF' }}>
-                <span>Departed Central Quad</span>
-                <span style={{ color: '#10B981' }}>● En Route to Pickup</span>
-                <span>Destination Core</span>
-              </div>
+                  PENDING REVIEW
+                </span>
+              )}
             </div>
           </div>
 
-          {/* Today's Scheduled Rides List */}
-          <div
-            style={{
-              position: 'relative',
-              background: '#1C2128',
-              border: '1px solid rgba(255, 255, 255, 0.12)',
-              boxShadow: '4px 4px 0px #0D1013',
-              borderRadius: '12px',
-              padding: '24px 28px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '16px',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <h3 style={{ fontSize: '16px', fontWeight: 900, margin: 0, color: '#F4F5F7' }}>Today's Scheduled Rides</h3>
-                </div>
-                <div style={{ fontSize: '12px', color: '#9CA3AF', marginTop: '2px' }}>
-                  Automatic dispatch reservations linked to your active campus pass
-                </div>
-              </div>
+          <div className="mb-6">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-[#8B949E] mb-4">
+              Today's Schedule
+            </h2>
 
-              <button
-                type="button"
-                onClick={() => setExtraRideModalOpen(true)}
-                style={{
-                  padding: '9px 18px',
-                  background: '#10B981',
-                  color: '#0B1116',
-                  border: '1px solid #10B981',
-                  boxShadow: '0 4px 14px rgba(16, 185, 129, 0.25), 3px 3px 0px #0D1013',
-                  borderRadius: '8px',
-                  fontSize: '11px',
-                  fontWeight: 900,
-                  letterSpacing: '0.04em',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  transition: 'all 0.15s ease',
-                }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 5v14" />
-                  <path d="M5 12h14" />
-                </svg>
-                <span>Request Extra Ride</span>
-              </button>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              {rides.map((r) => (
+            <div className="space-y-3">
+              {rides.map(ride => (
                 <div
-                  key={r.id}
+                  key={ride.id}
                   style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '14px 20px',
-                    borderRadius: '8px',
-                    border: '1px solid rgba(255, 255, 255, 0.12)',
-                    background: '#13161B',
-                    opacity: r.skipped ? 0.45 : 1.0,
-                    transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
+                    backgroundColor: '#11161D',
+                    border: '1px solid #1E2631',
+                    opacity: ride.skipped ? 0.45 : 1
                   }}
+                  className="rounded-xl px-5 py-4 flex items-center justify-between gap-4 transition-all"
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-                    {/* Timestamp with strikethrough animation when skipped */}
-                    <div
-                      style={{
-                        fontSize: '15px',
-                        fontWeight: 800,
-                        fontFamily: 'monospace',
-                        color: '#F4F5F7',
-                        minWidth: '90px',
-                        textDecoration: r.skipped ? 'line-through' : 'none',
-                        textDecorationColor: '#10B981',
-                        textDecorationThickness: '2px',
-                        transition: 'all 0.2s ease',
-                      }}
-                    >
-                      {r.time}
-                    </div>
-
-                    <div>
-                      <div style={{ fontSize: '13px', fontWeight: 700, color: '#F4F5F7' }}>
-                        {r.route}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: '11px',
-                          fontWeight: 600,
-                          color: r.skipped ? '#9CA3AF' : '#10B981',
-                          marginTop: '2px',
-                        }}
-                      >
-                        {r.skipped ? '● SKIPPED FOR TODAY' : r.status}
-                      </div>
-                    </div>
+                  <div
+                    className={`font-mono text-base font-semibold min-w-[90px] ${
+                      ride.skipped ? 'line-through text-[#8B949E]' : 'text-[#F0F6FC]'
+                    }`}
+                  >
+                    {ride.time}
                   </div>
 
-                  {/* Skip Today Toggle Button */}
+                  <div className={`flex-1 text-sm font-medium ${ride.skipped ? 'text-[#8B949E]' : 'text-[#F0F6FC]'}`}>
+                    {ride.route}
+                  </div>
+
                   <button
                     type="button"
-                    onClick={() => toggleSkipRide(r.id)}
+                    role="switch"
+                    aria-checked={ride.skipped}
+                    onClick={() => handleSkipRide(ride.id)}
+                    disabled={ride.raw_status === 'completed'}
                     style={{
-                      padding: '6px 14px',
-                      borderRadius: '6px',
-                      border: '1px solid rgba(255, 255, 255, 0.12)',
-                      background: r.skipped ? '#10B981' : '#1C2128',
-                      color: r.skipped ? '#0B1116' : '#FFFFFF',
-                      boxShadow: r.skipped ? '0 2px 8px rgba(16, 185, 129, 0.3)' : '2px 2px 0px #0D1013',
-                      fontSize: '11px',
-                      fontWeight: 800,
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease',
+                      backgroundColor: ride.skipped ? 'rgba(245, 158, 11, 0.1)' : '#090C10',
+                      borderColor: ride.skipped ? 'rgba(245, 158, 11, 0.3)' : '#1E2631'
                     }}
+                    className={`inline-flex items-center gap-2.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all ${
+                      ride.skipped ? 'text-amber-400' : 'text-[#8B949E] hover:text-[#F0F6FC]'
+                    }`}
                   >
-                    {r.skipped ? 'Reactivate Ride' : 'Skip Today'}
+                    <span
+                      className={`w-7 h-4 flex items-center rounded-full p-0.5 transition-colors ${
+                        ride.skipped ? 'bg-amber-500 justify-end' : 'bg-slate-700 justify-start'
+                      }`}
+                    >
+                      <span className="w-3 h-3 rounded-full bg-white shadow-sm" />
+                    </span>
+                    <span>{ride.skipped ? 'Skipped' : 'Skip Today'}</span>
                   </button>
                 </div>
               ))}
             </div>
           </div>
-        </section>
 
-        {/* ======================================================= */}
-        {/* SECTION 1: INTERACTIVE MONTHLY PASS BUILDER             */}
-        {/* ======================================================= */}
-        <section id="pass-builder-section">
-          <div style={{ marginBottom: '16px' }}>
-            <span style={{ fontSize: '10px', fontWeight: 800, letterSpacing: '0.12em', color: '#10B981', textTransform: 'uppercase' }}>
-              STEP 1 • MEDICAL MOBILITY VERIFICATION
-            </span>
-            <h2 style={{ fontSize: '24px', fontWeight: 900, margin: '4px 0 0 0', letterSpacing: '-0.01em', color: '#F4F5F7' }}>
-              Interactive Monthly Pass Builder
-            </h2>
-            <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#9CA3AF' }}>
-              Submit your medical details and certificate for campus mobility verification to activate your monthly electric cart pass.
-            </p>
-          </div>
-
-          {/* Split Card: Left Medical Verification Form / Right Live Digital Boarding Pass */}
-          <div
-            style={{
-              background: '#1C2128',
-              border: '1px solid rgba(255, 255, 255, 0.12)',
-              boxShadow: '4px 4px 0px #0D1013',
-              borderRadius: '12px',
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))',
-              overflow: 'hidden',
-            }}
-          >
-            {/* ---------------------------------------------------- */}
-            {/* LEFT: MEDICAL VERIFICATION FORM                      */}
-            {/* ---------------------------------------------------- */}
-            <form
-              onSubmit={handleSubmitVerification}
+          <div className="mt-8 flex justify-center">
+            <button
+              type="button"
+              onClick={() => setExtraRideModalOpen(true)}
               style={{
-                padding: '32px',
-                borderRight: '1px solid rgba(255, 255, 255, 0.12)',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '22px',
-                background: '#1C2128',
+                backgroundColor: 'transparent',
+                border: '1px solid #1E2631'
               }}
+              className="px-6 py-2.5 rounded-xl text-sm font-medium text-[#8B949E] hover:text-[#10B981] hover:border-[#10B981]/50 transition-colors flex items-center gap-2"
             >
-              {/* Medical Notice Pill */}
-              <div
-                style={{
-                  padding: '10px 14px',
-                  borderRadius: '8px',
-                  background: 'rgba(16, 185, 129, 0.08)',
-                  border: '1px solid rgba(16, 185, 129, 0.25)',
-                  fontSize: '11px',
-                  color: '#A7F3D0',
-                  lineHeight: 1.4,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                }}
-              >
-                <span style={{ fontSize: '14px' }}>📋</span>
-                <span>
-                  <strong>Campus Policy:</strong> Monthly passes are prioritized for students with medical injuries, post-surgery recovery, or chronic mobility needs.
-                </span>
-              </div>
+              <span className="text-[#10B981] font-semibold text-base leading-none">+</span>
+              <span>Request Extra Ride</span>
+            </button>
+          </div>
+        </main>
+      )}
 
-              {/* 1. Medical Condition / Injury Type */}
-              <div>
-                <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '6px', color: '#9CA3AF' }}>
-                  Medical Condition / Injury Type <span style={{ color: '#10B981' }}>*</span>
-                </label>
-                <select
-                  value={medicalCondition}
-                  onChange={(e) => {
-                    setMedicalCondition(e.target.value);
-                    triggerRoll();
-                  }}
-                  style={{
-                    width: '100%',
-                    padding: '10px 12px',
-                    borderRadius: '8px',
-                    border: '1px solid rgba(255, 255, 255, 0.15)',
-                    fontSize: '12px',
-                    fontWeight: 600,
-                    background: '#13161B',
-                    color: '#F4F5F7',
-                    outline: 'none',
-                  }}
-                >
-                  {MEDICAL_CONDITIONS.map((cond) => (
-                    <option key={cond} value={cond} style={{ background: '#13161B', color: '#F4F5F7' }}>
-                      {cond}
-                    </option>
-                  ))}
-                </select>
-
-                {medicalCondition === 'Other' && (
-                  <input
-                    type="text"
-                    placeholder="Specify condition / mobility injury..."
-                    value={customCondition}
-                    onChange={(e) => {
-                      setCustomCondition(e.target.value);
-                      triggerRoll();
-                    }}
-                    style={{
-                      marginTop: '8px',
-                      width: '100%',
-                      padding: '10px 12px',
-                      borderRadius: '8px',
-                      border: '1px solid rgba(255, 255, 255, 0.15)',
-                      fontSize: '12px',
-                      background: '#13161B',
-                      color: '#F4F5F7',
-                      outline: 'none',
-                    }}
-                  />
-                )}
-              </div>
-
-              {/* 2. Reason for Monthly Pass Textarea */}
-              <div>
-                <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '6px', color: '#9CA3AF' }}>
-                  Reason for Monthly Pass Request <span style={{ color: '#10B981' }}>*</span>
-                </label>
-                <textarea
-                  rows={3}
-                  value={reason}
-                  onChange={(e) => {
-                    setReason(e.target.value);
-                    triggerRoll();
-                  }}
-                  placeholder="Unable to walk from hostel to academic block due to cast on right leg..."
-                  style={{
-                    width: '100%',
-                    padding: '10px 12px',
-                    borderRadius: '8px',
-                    border: '1px solid rgba(255, 255, 255, 0.15)',
-                    fontSize: '12px',
-                    background: '#13161B',
-                    color: '#F4F5F7',
-                    resize: 'vertical',
-                    outline: 'none',
-                    lineHeight: 1.4,
-                  }}
-                />
-                <span style={{ fontSize: '10px', color: '#9CA3AF', marginTop: '2px', display: 'block' }}>
-                  Describe your mobility restrictions and commute challenges across campus.
-                </span>
-              </div>
-
-              {/* 3. Medical Certificate Upload with Drag & Drop + Image Thumbnail */}
-              <div>
-                <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '6px', color: '#9CA3AF' }}>
-                  Upload Medical Certificate / Clinic Slip <span style={{ color: '#10B981' }}>*</span>
-                </label>
-                <div
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    setIsDraggingFile(true);
-                  }}
-                  onDragLeave={() => setIsDraggingFile(false)}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    setIsDraggingFile(false);
-                    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-                      handleFileUpload(e.dataTransfer.files[0]);
-                    }
-                  }}
-                  onClick={() => fileInputRef.current && fileInputRef.current.click()}
-                  style={{
-                    border: isDraggingFile ? '2px dashed #10B981' : '1.5px dashed rgba(255, 255, 255, 0.25)',
-                    background: isDraggingFile ? 'rgba(16, 185, 129, 0.1)' : medicalSlip ? 'rgba(16, 185, 129, 0.06)' : '#13161B',
-                    borderRadius: '8px',
-                    padding: '14px',
-                    textAlign: 'center',
-                    cursor: 'pointer',
-                    transition: 'all 0.2s ease',
-                  }}
-                >
-                  <input
-                    type="file"
-                    ref={fileInputRef}
-                    style={{ display: 'none' }}
-                    accept=".pdf,.jpg,.jpeg,.png,image/*"
-                    onChange={(e) => {
-                      if (e.target.files && e.target.files[0]) {
-                        handleFileUpload(e.target.files[0]);
-                      }
-                    }}
-                  />
-                  {medicalSlip ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span style={{ color: '#10B981', fontWeight: 900, fontSize: '13px' }}>✓ Attached:</span>
-                        <span style={{ fontSize: '12px', fontWeight: 700, fontFamily: 'monospace', color: '#F4F5F7' }}>{medicalSlip.name}</span>
-                        <span style={{ fontSize: '10px', color: '#9CA3AF' }}>({medicalSlip.size})</span>
-                      </div>
-                      {certificatePreview && (
-                        <div style={{ marginTop: '4px' }}>
-                          <img
-                            src={certificatePreview}
-                            alt="Certificate Preview"
-                            style={{
-                              maxHeight: '60px',
-                              borderRadius: '4px',
-                              border: '1px solid rgba(255, 255, 255, 0.2)',
-                              objectFit: 'contain',
-                            }}
-                          />
-                        </div>
-                      )}
-                      <span style={{ fontSize: '10px', color: '#10B981', textDecoration: 'underline' }}>
-                        Click to change or replace file
-                      </span>
-                    </div>
-                  ) : (
-                    <div>
-                      <div style={{ fontSize: '12px', fontWeight: 700, color: '#F4F5F7' }}>
-                        Drop doctor slip / OPD prescription (.pdf, .jpg, .png), or <span style={{ color: '#10B981', textDecoration: 'underline' }}>browse</span>
-                      </div>
-                      <div style={{ fontSize: '10px', color: '#9CA3AF', marginTop: '4px' }}>
-                        Required for campus mobility verification
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* 4. Route Trajectory Template Toggle */}
-              <div>
-                <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '8px', color: '#9CA3AF' }}>
-                  Route Trajectory Template
-                </label>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px', padding: '4px', background: '#13161B', border: '1px solid rgba(255, 255, 255, 0.12)', borderRadius: '8px' }}>
-                  <button
-                    type="button"
-                    onClick={() => handleRouteTypeToggle('hostel_class')}
-                    style={{
-                      padding: '8px 12px',
-                      borderRadius: '6px',
-                      border: 'none',
-                      background: routeType === 'hostel_class' ? '#1C2128' : 'transparent',
-                      color: routeType === 'hostel_class' ? '#F4F5F7' : '#9CA3AF',
-                      boxShadow: routeType === 'hostel_class' ? '0 1px 4px rgba(0,0,0,0.3)' : 'none',
-                      fontSize: '11px',
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease',
-                    }}
-                  >
-                    Hostel → Class
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleRouteTypeToggle('gate_class')}
-                    style={{
-                      padding: '8px 12px',
-                      borderRadius: '6px',
-                      border: 'none',
-                      background: routeType === 'gate_class' ? '#1C2128' : 'transparent',
-                      color: routeType === 'gate_class' ? '#F4F5F7' : '#9CA3AF',
-                      boxShadow: routeType === 'gate_class' ? '0 1px 4px rgba(0,0,0,0.3)' : 'none',
-                      fontSize: '11px',
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                      transition: 'all 0.15s ease',
-                    }}
-                  >
-                    Main Gate → Class
-                  </button>
-                </div>
-              </div>
-
-              {/* 5. Pickup & Drop Selectors */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '6px', color: '#9CA3AF' }}>
-                    Pickup Station
-                  </label>
-                  <select
-                    value={pickup}
-                    onChange={(e) => {
-                      setPickup(e.target.value);
-                      triggerRoll();
-                    }}
-                    style={{
-                      width: '100%',
-                      padding: '10px 12px',
-                      borderRadius: '8px',
-                      border: '1px solid rgba(255, 255, 255, 0.15)',
-                      fontSize: '12px',
-                      fontWeight: 600,
-                      background: '#13161B',
-                      color: '#F4F5F7',
-                      outline: 'none',
-                    }}
-                  >
-                    {PICKUP_LOCATIONS.map((loc) => (
-                      <option key={loc} value={loc} style={{ background: '#13161B', color: '#F4F5F7' }}>
-                        {loc}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '6px', color: '#9CA3AF' }}>
-                    Drop Station
-                  </label>
-                  <select
-                    value={drop}
-                    onChange={(e) => {
-                      setDrop(e.target.value);
-                      triggerRoll();
-                    }}
-                    style={{
-                      width: '100%',
-                      padding: '10px 12px',
-                      borderRadius: '8px',
-                      border: '1px solid rgba(255, 255, 255, 0.15)',
-                      fontSize: '12px',
-                      fontWeight: 600,
-                      background: '#13161B',
-                      color: '#F4F5F7',
-                      outline: 'none',
-                    }}
-                  >
-                    {DROP_LOCATIONS.map((loc) => (
-                      <option key={loc} value={loc} style={{ background: '#13161B', color: '#F4F5F7' }}>
-                        {loc}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              {/* 6. Time-Slot Pill Chips */}
-              <div>
-                <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '8px', color: '#9CA3AF' }}>
-                  Daily Scheduled Time Slots
-                </label>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                  {TIME_SLOTS.map((slot) => {
-                    const isSelected = selectedSlots.includes(slot);
-                    return (
-                      <button
-                        key={slot}
-                        type="button"
-                        onClick={() => toggleSlot(slot)}
-                        style={{
-                          padding: '7px 14px',
-                          borderRadius: '20px',
-                          border: isSelected ? '1px solid #10B981' : '1px solid rgba(255, 255, 255, 0.12)',
-                          background: isSelected ? '#10B981' : '#13161B',
-                          color: isSelected ? '#0B1116' : '#9CA3AF',
-                          boxShadow: isSelected ? '0 2px 8px rgba(16, 185, 129, 0.3), 2px 2px 0px #0D1013' : 'none',
-                          fontSize: '11px',
-                          fontWeight: isSelected ? 900 : 700,
-                          cursor: 'pointer',
-                          transition: 'all 0.15s ease',
-                        }}
-                      >
-                        {slot}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* 7. Duration Selector */}
-              <div>
-                <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: '8px', color: '#9CA3AF' }}>
-                  Pass Validity Duration
-                </label>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
-                  {DURATIONS.map((dur) => {
-                    const isSelected = duration === dur.id;
-                    return (
-                      <button
-                        key={dur.id}
-                        type="button"
-                        onClick={() => handleDurationSelect(dur.id)}
-                        style={{
-                          padding: '10px 8px',
-                          borderRadius: '8px',
-                          border: isSelected ? '1px solid #10B981' : '1px solid rgba(255, 255, 255, 0.12)',
-                          background: isSelected ? '#13161B' : '#1C2128',
-                          boxShadow: isSelected ? '2px 2px 0px #10B981' : 'none',
-                          color: isSelected ? '#F4F5F7' : '#9CA3AF',
-                          cursor: 'pointer',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          alignItems: 'center',
-                          gap: '2px',
-                          transition: 'all 0.15s ease',
-                        }}
-                      >
-                        <span style={{ fontSize: '12px', fontWeight: 800 }}>{dur.label}</span>
-                        <span style={{ fontSize: '9px', fontWeight: 600, color: '#9CA3AF' }}>{dur.days} Days Access</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Validation Error Message */}
-              {formError && (
-                <div
-                  style={{
-                    padding: '10px 14px',
-                    background: 'rgba(239, 68, 68, 0.12)',
-                    border: '1px solid #EF4444',
-                    borderRadius: '8px',
-                    color: '#F87171',
-                    fontSize: '12px',
-                    fontWeight: 700,
-                  }}
-                >
-                  ⚠️ {formError}
-                </div>
-              )}
-
-              {/* Success Message */}
-              {submitSuccessMsg && (
-                <div
-                  style={{
-                    padding: '10px 14px',
-                    background: 'rgba(16, 185, 129, 0.12)',
-                    border: '1px solid #10B981',
-                    borderRadius: '8px',
-                    color: '#6EE7B7',
-                    fontSize: '12px',
-                    fontWeight: 700,
-                  }}
-                >
-                  ✓ {submitSuccessMsg}
-                </div>
-              )}
-
-              {/* Submit for Verification Button */}
-              <button
-                type="submit"
-                style={{
-                  marginTop: '8px',
-                  padding: '14px 20px',
-                  background: '#10B981',
-                  color: '#0B1116',
-                  border: '1px solid #10B981',
-                  boxShadow: '0 4px 16px rgba(16, 185, 129, 0.3), 3px 3px 0px #0D1013',
-                  borderRadius: '8px',
-                  fontSize: '13px',
-                  fontWeight: 900,
-                  letterSpacing: '0.04em',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '8px',
-                  transition: 'all 0.15s ease',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = '#34D399';
-                  e.currentTarget.style.boxShadow = '0 6px 20px rgba(16, 185, 129, 0.45), 3px 3px 0px #0D1013';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = '#10B981';
-                  e.currentTarget.style.boxShadow = '0 4px 16px rgba(16, 185, 129, 0.3), 3px 3px 0px #0D1013';
-                }}
-              >
-                <span>Submit for Verification →</span>
-              </button>
-            </form>
-
-            {/* ---------------------------------------------------- */}
-            {/* RIGHT: LIVE DIGITAL BOARDING PASS                    */}
-            {/* ---------------------------------------------------- */}
+      {activeTab === 'pass' && (
+        <main className="max-w-5xl mx-auto px-6">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
             <div
               style={{
-                padding: '36px 32px',
-                background: '#13161B',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
+                backgroundColor: '#11161D',
+                border: '1px solid #1E2631'
               }}
+              className="lg:col-span-7 rounded-xl p-6 sm:p-8 space-y-6"
             >
-              {/* Ticket Shape with Semicircle Side Notches */}
-              <div
-                key={rollKey}
-                style={{
-                  width: '100%',
-                  maxWidth: '380px',
-                  background: '#1C2128',
-                  border: '1.5px solid rgba(255, 255, 255, 0.2)',
-                  boxShadow: '4px 4px 0px #0D1013',
-                  borderRadius: '16px',
-                  position: 'relative',
-                  overflow: 'hidden',
-                  animation: 'verticalRoll 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards',
-                  fontFamily: '"IBM Plex Mono", monospace, monospace',
-                }}
-              >
-                {/* Semicircle Side Notches */}
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: '68%',
-                    left: '-12px',
-                    width: '22px',
-                    height: '22px',
-                    borderRadius: '50%',
-                    background: '#13161B',
-                    border: '1.5px solid rgba(255, 255, 255, 0.2)',
-                    zIndex: 10,
-                  }}
-                />
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: '68%',
-                    right: '-12px',
-                    width: '22px',
-                    height: '22px',
-                    borderRadius: '50%',
-                    background: '#13161B',
-                    border: '1.5px solid rgba(255, 255, 255, 0.2)',
-                    zIndex: 10,
-                  }}
-                />
+              <div>
+                <h2 className="text-xl font-semibold text-[#F0F6FC]">Pass Verification Details</h2>
+                <p className="text-sm text-[#8B949E] mt-1">Your mobility application has been filed with the Transport Office.</p>
+              </div>
 
-                {/* Ticket Top Header with Live Pass Status Badge */}
-                <div
-                  style={{
-                    padding: '16px 20px',
-                    background: '#13161B',
-                    color: '#F4F5F7',
-                    borderBottom: '1px solid rgba(255, 255, 255, 0.12)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <div
-                      style={{
-                        width: '8px',
-                        height: '8px',
-                        borderRadius: '50%',
-                        background: isApproved ? '#10B981' : isPending ? '#F59E0B' : '#EF4444',
-                        boxShadow: isApproved
-                          ? '0 0 8px #10B981'
-                          : isPending
-                          ? '0 0 8px #F59E0B'
-                          : '0 0 8px #EF4444',
-                      }}
-                    />
-                    <span style={{ fontSize: '13px', fontWeight: 800, letterSpacing: '0.1em' }}>QARTIX PASS</span>
-                  </div>
+              <div className="space-y-4 text-sm">
+                <div className="flex justify-between py-2 border-b border-[#1E2631]">
+                  <span className="text-[#8B949E]">Assigned Route</span>
+                  <span className="text-[#F0F6FC] font-medium">{displayRoute}</span>
+                </div>
+                <div className="flex justify-between py-2 border-b border-[#1E2631]">
+                  <span className="text-[#8B949E]">Selected Timings</span>
+                  <span className="font-mono text-[#10B981]">08:30 AM • 04:30 PM</span>
+                </div>
+                <div className="flex justify-between py-2 border-b border-[#1E2631]">
+                  <span className="text-[#8B949E]">Duration</span>
+                  <span className="text-[#F0F6FC] font-medium">{durationObj.label}</span>
+                </div>
+                <div className="flex justify-between py-2 border-b border-[#1E2631]">
+                  <span className="text-[#8B949E]">Status</span>
+                  <span className="text-[#10B981] font-semibold">{previewStatusText}</span>
+                </div>
+              </div>
+            </div>
 
-                  <span
-                    style={{
-                      padding: '3px 8px',
-                      borderRadius: '4px',
-                      fontSize: '9px',
-                      fontWeight: 800,
-                      letterSpacing: '0.06em',
-                      textTransform: 'uppercase',
-                      background: 'rgba(16, 185, 129, 0.2)',
-                      color: '#10B981',
-                      border: '1px solid rgba(16, 185, 129, 0.4)',
-                    }}
-                  >
-                    PASS SUBMITTED • TRANSPORT OFFICE NOTIFIED
+            <div
+              style={{
+                backgroundColor: '#11161D',
+                border: '1px solid #1E2631'
+              }}
+              className="lg:col-span-5 rounded-xl p-6 sm:p-7 space-y-6"
+            >
+              <div className="flex items-center justify-between border-b border-[#1E2631] pb-4">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-[#10B981]" />
+                  <span className="text-xs font-mono tracking-wider uppercase text-[#F0F6FC] font-semibold">
+                    QARTIX MOBILITY PASS
                   </span>
                 </div>
+                <span className="text-xs font-mono text-[#8B949E]">
+                  {latestRequest?.id || 'DIGITAL PASS'}
+                </span>
+              </div>
 
-                {/* Ticket Body: IBM Plex Mono Route Metadata & Stamp */}
-                <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px', position: 'relative' }}>
-                  {/* Status-Aligned Ink Stamp Slam Animation */}
-                  <div
-                    key={`stamp-${rollKey}`}
-                    style={{
-                      position: 'absolute',
-                      top: '42%',
-                      left: '50%',
-                      transform: 'translate(-50%, -50%) rotate(-4deg)',
-                      border: '3px double #10B981',
-                      borderRadius: '8px',
-                      padding: '6px 14px',
-                      color: '#10B981',
-                      textAlign: 'center',
-                      zIndex: 20,
-                      background: 'rgba(28, 33, 40, 0.95)',
-                      boxShadow: '0 4px 16px rgba(16, 185, 129, 0.4)',
-                      animation: 'stampSlam 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards',
-                      pointerEvents: 'none',
-                    }}
-                  >
-                    <div style={{ fontSize: '12px', fontWeight: 900, letterSpacing: '0.1em' }}>
-                      PASS SUBMITTED • RECORD FILED
-                    </div>
-                    <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.08em' }}>
-                      TRANSPORT OFFICE NOTIFIED • ACTIVE ACCESS
-                    </div>
-                  </div>
-
-                  {/* Route Trajectory */}
-                  <div>
-                    <div style={{ fontSize: '10px', color: '#9CA3AF', fontWeight: 700, textTransform: 'uppercase' }}>
-                      ROUTE TRAJECTORY
-                    </div>
-                    <div style={{ fontSize: '13px', fontWeight: 800, color: '#F4F5F7', marginTop: '2px', lineHeight: 1.3 }}>
-                      {pickup}
-                    </div>
-                    <div style={{ fontSize: '11px', fontWeight: 800, color: '#10B981', margin: '2px 0' }}>
-                      ↓ VIA CAMPUS ELECTRIC LOOP
-                    </div>
-                    <div style={{ fontSize: '13px', fontWeight: 800, color: '#F4F5F7', lineHeight: 1.3 }}>
-                      {drop}
-                    </div>
-                  </div>
-
-                  {/* Student & Pass IDs */}
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', paddingTop: '8px', borderTop: '1px dashed rgba(255, 255, 255, 0.15)' }}>
-                    <div>
-                      <div style={{ fontSize: '9px', color: '#9CA3AF', fontWeight: 700 }}>STUDENT</div>
-                      <div style={{ fontSize: '12px', fontWeight: 800, color: '#F4F5F7' }}>{student.fullName || 'Pranav Kumar'}</div>
-                      <div style={{ fontSize: '10px', color: '#9CA3AF' }}>{currentStudentId}</div>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: '9px', color: '#9CA3AF', fontWeight: 700 }}>VALIDITY</div>
-                      <div style={{ fontSize: '12px', fontWeight: 800, color: '#F4F5F7' }}>{durationObj.label}</div>
-                      <div style={{ fontSize: '10px', color: '#9CA3AF' }}>{durationObj.days} Days</div>
-                    </div>
-                  </div>
-
-                  {/* Medical Condition & Attachment Summary */}
-                  <div style={{ paddingTop: '8px', borderTop: '1px dashed rgba(255, 255, 255, 0.15)' }}>
-                    <div style={{ fontSize: '9px', color: '#9CA3AF', fontWeight: 700, marginBottom: '2px' }}>
-                      MEDICAL VERIFICATION DETAILS
-                    </div>
-                    <div style={{ fontSize: '11px', fontWeight: 700, color: '#F4F5F7' }}>
-                      ● {medicalCondition === 'Other' && customCondition ? customCondition : medicalCondition}
-                    </div>
-                    <div style={{ fontSize: '10px', color: '#9CA3AF', marginTop: '2px', fontStyle: 'italic', lineHeight: 1.3 }}>
-                      "{reason.length > 60 ? reason.slice(0, 60) + '...' : reason}"
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px', fontSize: '10px', color: '#10B981' }}>
-                      <span>📎 Doc:</span>
-                      <span style={{ fontFamily: 'monospace', color: '#F4F5F7' }}>{medicalSlip ? medicalSlip.name : 'clinic_slip.pdf'}</span>
-                    </div>
-                  </div>
-
-                  {/* Scheduled Slots */}
-                  <div style={{ paddingTop: '8px', borderTop: '1px dashed rgba(255, 255, 255, 0.15)' }}>
-                    <div style={{ fontSize: '9px', color: '#9CA3AF', fontWeight: 700, marginBottom: '4px' }}>
-                      AUTHORIZED DISPATCH WINDOWS
-                    </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                      {selectedSlots.map((s) => (
-                        <span key={s} style={{ padding: '2px 6px', background: '#13161B', border: '1px solid rgba(255, 255, 255, 0.12)', color: '#F4F5F7', borderRadius: '4px', fontSize: '10px', fontWeight: 800 }}>
-                          {s}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
+              <div className="space-y-4">
+                <div>
+                  <div className="text-xs uppercase tracking-wider text-[#8B949E] font-medium">Student Name</div>
+                  <div className="text-xl font-bold text-[#F0F6FC] mt-0.5">{studentName}</div>
                 </div>
 
-                {/* Perforation Line */}
-                <div style={{ borderTop: '2px dashed rgba(255, 255, 255, 0.2)', margin: '0 12px' }} />
+                <div>
+                  <div className="text-xs uppercase tracking-wider text-[#8B949E] font-medium">Route</div>
+                  <div className="text-sm font-semibold text-[#F0F6FC] mt-0.5">{displayRoute}</div>
+                </div>
 
-                {/* Ticket Stub: QR Code & Verification State */}
-                <div
-                  style={{
-                    padding: '20px 24px',
-                    background: '#13161B',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                  }}
-                >
-                  <div>
-                    <div style={{ fontSize: '9px', color: '#9CA3AF', fontWeight: 700 }}>DIGITAL PASS TOKEN</div>
-                    <div style={{ fontSize: '12px', fontWeight: 800, color: '#F4F5F7' }}>QR-84920-X88</div>
-                    <div
-                      style={{
-                        fontSize: '9px',
-                        color: '#10B981',
-                        fontWeight: 700,
-                        marginTop: '2px',
-                      }}
-                    >
-                      ● TAP OR SCAN AT BOARDING
-                    </div>
-                  </div>
+                <div>
+                  <div className="text-xs uppercase tracking-wider text-[#8B949E] font-medium">Timings</div>
+                  <div className="text-sm font-mono text-[#10B981] font-semibold mt-0.5">08:30 AM • 04:30 PM</div>
+                </div>
 
-                  {/* Geometric QR Code SVG Placeholder */}
+                <div>
+                  <div className="text-xs uppercase tracking-wider text-[#8B949E] font-medium">Duration</div>
+                  <div className="text-sm font-semibold text-[#F0F6FC] mt-0.5">{durationObj.label}</div>
+                </div>
+
+                <div className="pt-2 border-t border-[#1E2631]">
+                  <div className="text-xs uppercase tracking-wider text-[#8B949E] font-medium mb-1.5">Pass Status</div>
                   <div
                     style={{
-                      width: '64px',
-                      height: '64px',
-                      background: '#FFFFFF',
-                      border: '1.5px solid #10B981',
-                      borderRadius: '6px',
-                      padding: '4px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      opacity: 1,
+                      backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                      color: '#10B981',
+                      border: '1px solid rgba(16, 185, 129, 0.3)'
                     }}
+                    className="px-3 py-2 rounded-lg text-center text-xs font-bold tracking-wide"
                   >
-                    <svg width="52" height="52" viewBox="0 0 24 24" fill="#16181A">
-                      <rect x="2" y="2" width="6" height="6" />
-                      <rect x="16" y="2" width="6" height="6" />
-                      <rect x="2" y="16" width="6" height="6" />
-                      <rect x="4" y="4" width="2" height="2" fill="#FFFFFF" />
-                      <rect x="18" y="4" width="2" height="2" fill="#FFFFFF" />
-                      <rect x="4" y="18" width="2" height="2" fill="#FFFFFF" />
-                      <rect x="10" y="2" width="4" height="2" />
-                      <rect x="10" y="6" width="2" height="4" />
-                      <rect x="14" y="10" width="4" height="2" />
-                      <rect x="10" y="14" width="4" height="4" />
-                      <rect x="18" y="14" width="4" height="2" />
-                      <rect x="16" y="18" width="6" height="4" />
-                    </svg>
+                    {previewStatusText}
                   </div>
                 </div>
               </div>
             </div>
           </div>
-        </section>
-      </main>
+        </main>
+      )}
 
-      {/* -------------------------------------------------------- */}
-      {/* EXTRA RIDE MODAL                                         */}
-      {/* -------------------------------------------------------- */}
-      {Boolean(extraRideModalOpen) ? (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            zIndex: 100,
-            background: 'rgba(22, 24, 26, 0.65)',
-            backdropFilter: 'blur(6px)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '20px',
-          }}
-        >
+      {extraRideModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div
             style={{
-              width: '100%',
-              maxWidth: '480px',
-              background: '#1C2128',
-              border: '1.5px solid rgba(255, 255, 255, 0.2)',
-              boxShadow: '6px 6px 0px #0D1013',
-              borderRadius: '12px',
-              padding: '28px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '20px',
+              backgroundColor: '#11161D',
+              border: '1px solid #1E2631'
             }}
+            className="rounded-xl max-w-md w-full p-6 space-y-5"
           >
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '16px' }}>
+            <div className="flex items-center justify-between border-b border-[#1E2631] pb-3">
+              <h3 className="text-base font-bold text-[#F0F6FC]">Request Extra Ride</h3>
+              <button
+                type="button"
+                onClick={() => setExtraRideModalOpen(false)}
+                className="text-[#8B949E] hover:text-[#F0F6FC] text-lg font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmExtraRide} className="space-y-4">
               <div>
-                <span style={{ fontSize: '10px', fontWeight: 900, padding: '3px 8px', background: '#10B981', color: '#0B1116', borderRadius: '4px' }}>
-                  PRIORITY DISPATCH
-                </span>
-                <h3 style={{ fontSize: '20px', fontWeight: 900, margin: '8px 0 4px 0', color: '#F4F5F7' }}>
-                  Request On-Demand Extra Ride
-                </h3>
-                <p style={{ fontSize: '12px', color: '#9CA3AF', margin: 0, lineHeight: 1.5 }}>
-                  For urgent campus clinic visits, unscheduled lab assignments, or accessibility transport.
-                </p>
+                <label className="text-xs uppercase tracking-wider text-[#8B949E] font-semibold block mb-1.5">
+                  Pickup Location
+                </label>
+                <input
+                  type="text"
+                  value={extraPickup}
+                  onChange={(e) => setExtraPickup(e.target.value)}
+                  style={{
+                    backgroundColor: '#090C10',
+                    border: '1px solid #1E2631'
+                  }}
+                  className="w-full px-4 py-2 rounded-lg text-sm text-[#F0F6FC] focus:outline-none focus:border-[#10B981]"
+                />
               </div>
-              <button
-                type="button"
-                onClick={() => setExtraRideModalOpen(false)}
-                style={{
-                  width: '28px',
-                  height: '28px',
-                  minWidth: '28px',
-                  minHeight: '28px',
-                  borderRadius: '50%',
-                  background: '#13161B',
-                  border: '1px solid rgba(255, 255, 255, 0.15)',
-                  color: '#9CA3AF',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: '16px',
-                  lineHeight: 1,
-                  padding: 0,
-                  transition: 'all 0.15s ease',
-                  flexShrink: 0,
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.color = '#FFFFFF';
-                  e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.3)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.color = '#9CA3AF';
-                  e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)';
-                }}
-                title="Close"
-                aria-label="Close"
-              >
-                ×
-              </button>
-            </div>
 
-            <div>
-              <label style={{ display: 'block', fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', marginBottom: '6px', color: '#9CA3AF' }}>
-                Urgent Destination
-              </label>
-              <select
-                value={extraDestination}
-                onChange={(e) => setExtraDestination(e.target.value)}
-                style={{
-                  width: '100%',
-                  padding: '10px 12px',
-                  borderRadius: '8px',
-                  border: '1px solid rgba(255, 255, 255, 0.15)',
-                  fontSize: '13px',
-                  fontWeight: 600,
-                  background: '#13161B',
-                  color: '#F4F5F7',
-                }}
-              >
-                <option value="Campus Health Clinic (Urgent)">Campus Health Clinic (Urgent)</option>
-                <option value="Advanced Sciences Research Lab">Advanced Sciences Research Lab</option>
-                <option value="Main Campus Exit Gate">Main Campus Exit Gate</option>
-                <option value="Central Administration Building">Central Administration Building</option>
-              </select>
-            </div>
+              <div>
+                <label className="text-xs uppercase tracking-wider text-[#8B949E] font-semibold block mb-1.5">
+                  Destination
+                </label>
+                <select
+                  value={extraDrop}
+                  onChange={(e) => setExtraDrop(e.target.value)}
+                  style={{
+                    backgroundColor: '#090C10',
+                    border: '1px solid #1E2631'
+                  }}
+                  className="w-full px-4 py-2 rounded-lg text-sm text-[#F0F6FC] focus:outline-none focus:border-[#10B981]"
+                >
+                  {academicBlocks.map((b) => (
+                    <option key={b} value={b} className="bg-[#090C10]">{b}</option>
+                  ))}
+                </select>
+              </div>
 
-            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '10px' }}>
-              <button
-                type="button"
-                onClick={() => setExtraRideModalOpen(false)}
-                title="Close modal"
-                style={{
-                  padding: '10px 16px',
-                  background: '#13161B',
-                  color: '#9CA3AF',
-                  border: '1px solid rgba(255, 255, 255, 0.12)',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                }}
-              >
-                Cancel
-              </button>
+              {extraError && <p className="text-xs text-red-400 font-medium">{extraError}</p>}
 
-              <button
-                type="button"
-                onClick={handleRequestExtraRide}
-                disabled={extraConfirmed}
-                style={{
-                  padding: '10px 20px',
-                  background: extraConfirmed ? '#2E6F5E' : '#10B981',
-                  color: extraConfirmed ? '#FFFFFF' : '#0B1116',
-                  border: extraConfirmed ? '1px solid #2E6F5E' : '1px solid #10B981',
-                  boxShadow: '0 4px 14px rgba(16, 185, 129, 0.25), 3px 3px 0px #0D1013',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                  fontWeight: 900,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  transition: 'all 0.15s ease',
-                }}
-                onMouseEnter={(e) => {
-                  if (!extraConfirmed) {
-                    e.currentTarget.style.background = '#34D399';
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (!extraConfirmed) {
-                    e.currentTarget.style.background = '#10B981';
-                  }
-                }}
-              >
-                {extraConfirmed ? 'Dispatched!' : 'Dispatch Nearest Cart →'}
-              </button>
-            </div>
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setExtraRideModalOpen(false)}
+                  style={{
+                    backgroundColor: '#090C10',
+                    border: '1px solid #1E2631'
+                  }}
+                  className="flex-1 py-2.5 rounded-lg text-xs font-semibold text-[#8B949E] hover:text-[#F0F6FC] transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  style={{ backgroundColor: '#10B981' }}
+                  className="flex-1 py-2.5 rounded-lg text-xs font-bold text-white hover:bg-[#059669] transition-all"
+                >
+                  Confirm Extra Ride
+                </button>
+              </div>
+            </form>
           </div>
         </div>
-      ) : null}
+      )}
     </div>
   );
 }
+
 
     // =========================================================
     // 3.5. ADMIN INTERFACE (TRANSPORT OFFICE)
@@ -6922,7 +6086,7 @@ function AdminInterface({ admin = { fullName: 'Transport Officer' }, onLogout = 
 function App() {
   // Authentication State: null | { role: 'student' | 'driver' | 'admin', id, fullName, ... }
   const [currentUser, setCurrentUser] = useState(null);
-  const [studentView, setStudentView] = useState('landing'); // 'landing' | 'dashboard'
+  const [studentView, setStudentView] = useState('dashboard'); // 'dashboard' | 'landing'
   const [welcomeToast, setWelcomeToast] = useState(null);
 
   // Restore Supabase session on initial mount
@@ -6969,7 +6133,11 @@ function App() {
       role,
       ...user,
     });
-    setStudentView('landing');
+    if (role === 'student') {
+      setStudentView('dashboard');
+    } else {
+      setStudentView('landing');
+    }
 
     // Craft contextual welcome message
     let message = '';
@@ -7002,6 +6170,183 @@ function App() {
   // 1. Initial Screen: AuthPage
   if (!currentUser) {
     return <AuthPage onAuthenticate={handleAuthenticate} />;
+  }
+
+  // 2. Pending Driver Approval Protection Screen
+  if (currentUser.role === 'driver' && (!currentUser.driverApproved && currentUser.status === 'pending_approval')) {
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          width: '100%',
+          backgroundColor: '#13161B',
+          backgroundImage: 'radial-gradient(circle at 50% 35%, #242A34 0%, #13161B 75%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '24px',
+          color: '#F4F5F7',
+          fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
+          textAlign: 'center',
+        }}
+      >
+        <div
+          style={{
+            maxWidth: '460px',
+            width: '100%',
+            backgroundColor: '#1C2128',
+            border: '1px solid rgba(245, 158, 11, 0.4)',
+            borderRadius: '16px',
+            padding: '36px 28px',
+            boxShadow: '0 16px 40px rgba(0, 0, 0, 0.6)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+          }}
+        >
+          <div
+            style={{
+              width: '60px',
+              height: '60px',
+              borderRadius: '50%',
+              backgroundColor: 'rgba(245, 158, 11, 0.15)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginBottom: '18px',
+              border: '1px solid #F59E0B',
+            }}
+          >
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <polyline points="12 6 12 12 16 14" />
+            </svg>
+          </div>
+          <h2 style={{ fontSize: '18px', fontWeight: 800, color: '#FCD34D', margin: '0 0 10px 0' }}>
+            Awaiting Transport Office Approval
+          </h2>
+          <p style={{ fontSize: '13px', color: '#9CA3AF', lineHeight: 1.55, margin: '0 0 24px 0' }}>
+            Your driver account (<strong style={{ color: '#F4F5F7' }}>{currentUser.cartNumber || currentUser.driverId}</strong>) has been registered and is pending verification by the campus transport office. Driver Cockpit access will be unlocked once approved.
+          </p>
+          <button
+            type="button"
+            onClick={handleLogout}
+            style={{
+              padding: '10px 24px',
+              borderRadius: '8px',
+              backgroundColor: '#13161B',
+              border: '1px solid rgba(255, 255, 255, 0.15)',
+              color: '#F4F5F7',
+              fontSize: '13px',
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            Log Out & Return
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. Admin Area Protection Screen (If visiting /admin as non-admin)
+  const isPathAdmin = typeof window !== 'undefined' && (window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin'));
+  if (isPathAdmin && currentUser.role !== 'admin') {
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          width: '100%',
+          backgroundColor: '#13161B',
+          backgroundImage: 'radial-gradient(circle at 50% 35%, #242A34 0%, #13161B 75%)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '24px',
+          color: '#F4F5F7',
+          fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
+          textAlign: 'center',
+        }}
+      >
+        <div
+          style={{
+            maxWidth: '500px',
+            width: '100%',
+            backgroundColor: '#1C2128',
+            border: '1px solid rgba(239, 68, 68, 0.4)',
+            borderRadius: '16px',
+            padding: '40px 32px',
+            boxShadow: '0 20px 48px rgba(0, 0, 0, 0.7)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+          }}
+        >
+          <div
+            style={{
+              fontSize: '11px',
+              fontWeight: 800,
+              color: '#EF4444',
+              backgroundColor: 'rgba(239, 68, 68, 0.1)',
+              padding: '4px 10px',
+              borderRadius: '6px',
+              border: '1px solid rgba(239, 68, 68, 0.25)',
+              marginBottom: '12px',
+            }}
+          >
+            403 • ACCESS RESTRICTED
+          </div>
+          <h2 style={{ fontSize: '20px', fontWeight: 800, color: '#F4F5F7', margin: '0 0 10px 0' }}>
+            Transport Office Access Only
+          </h2>
+          <p style={{ fontSize: '13px', color: '#9CA3AF', lineHeight: 1.6, margin: '0 0 24px 0' }}>
+            The /admin console is restricted to university fleet administrators. Your current session is authenticated as {currentUser.fullName || currentUser.email} with role {currentUser.role?.toUpperCase()}.
+          </p>
+          <div style={{ display: 'flex', gap: '12px', width: '100%' }}>
+            <button
+              type="button"
+              onClick={() => {
+                if (typeof window !== 'undefined') {
+                  window.history.pushState({}, '', '/');
+                  window.location.reload();
+                }
+              }}
+              style={{
+                flex: 1,
+                padding: '11px 16px',
+                borderRadius: '8px',
+                backgroundColor: '#10B981',
+                border: 'none',
+                color: '#04100C',
+                fontSize: '13px',
+                fontWeight: 800,
+                cursor: 'pointer',
+              }}
+            >
+              Return to Dashboard
+            </button>
+            <button
+              type="button"
+              onClick={handleLogout}
+              style={{
+                padding: '11px 18px',
+                borderRadius: '8px',
+                backgroundColor: '#13161B',
+                border: '1px solid rgba(255, 255, 255, 0.15)',
+                color: '#F4F5F7',
+                fontSize: '13px',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              Sign Out
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (

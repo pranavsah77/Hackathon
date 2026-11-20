@@ -4638,21 +4638,7 @@ function StudentDashboard({
   const pickupLocation = student?.hostel || 'Hostel Gate';
   const displayRoute = `${pickupLocation} → ${academicBlocks[0]}`;
 
-  // Check if student already has a submitted pass in requests
-  useEffect(() => {
-    if (requestsList.length > 0) {
-      const existing = requestsList.find(r =>
-        (r.studentId && r.studentId.toUpperCase() === currentStudentId.toUpperCase()) ||
-        r.status === 'approved' || r.status === 'active' || r.status === 'pending'
-      );
-      if (existing) {
-        setHasSubmittedPass(true);
-        try {
-          localStorage.setItem(`qartix_pass_submitted_${currentStudentId}`, 'true');
-        } catch (e) {}
-      }
-    }
-  }, [requestsList, currentStudentId]);
+// hasSubmittedPass is strictly driven by localStorage submission
 
   const activePass = requestsList.find(r => r.status === 'approved' || r.status === 'active');
   const pendingPass = requestsList.find(r => r.status === 'pending');
@@ -5002,6 +4988,23 @@ function StudentDashboard({
               <span>3D Cart View</span>
             </button>
 
+            <button
+              type="button"
+              onClick={() => {
+                try {
+                  localStorage.removeItem(`qartix_pass_submitted_${currentStudentId}`);
+                } catch (e) {}
+                setHasSubmittedPass(false);
+              }}
+              style={{
+                backgroundColor: '#11161D',
+                border: '1px solid #1E2631'
+              }}
+              className="px-3.5 py-2 text-xs sm:text-sm font-medium text-[#8B949E] hover:text-[#10B981] rounded-lg transition-colors"
+              title="Return to Stage 1 Application"
+            >
+              Re-apply Pass
+            </button>
             <button
               type="button"
               onClick={onLogout}
@@ -6083,7 +6086,7 @@ function AdminInterface({ admin = { fullName: 'Transport Officer' }, onLogout = 
 function App() {
   // Authentication State: null | { role: 'student' | 'driver' | 'admin', id, fullName, ... }
   const [currentUser, setCurrentUser] = useState(null);
-  const [studentView, setStudentView] = useState('landing'); // 'landing' | 'dashboard'
+  const [studentView, setStudentView] = useState('dashboard'); // 'dashboard' | 'landing'
   const [welcomeToast, setWelcomeToast] = useState(null);
 
   // Restore Supabase session on initial mount

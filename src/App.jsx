@@ -8,7 +8,7 @@ import { useAuth } from './context/AuthContext.jsx';
 
 export default function App() {
   const { currentUser, role, status, isDriverApproved, isLoading, logout, refreshSession } = useAuth();
-  const [studentView, setStudentView] = useState('landing'); // 'landing' | 'dashboard'
+  const [studentView, setStudentView] = useState('dashboard'); // 'dashboard' | 'landing'
   const [welcomeToast, setWelcomeToast] = useState(null);
   const [currentPath, setCurrentPath] = useState(() => {
     return typeof window !== 'undefined' ? window.location.pathname : '/';
