@@ -9,6 +9,17 @@ export function AuthProvider({ children }) {
 
   // Sync session and profile from Supabase
   const syncSession = useCallback(async () => {
+    // Only restore session if actively authenticated during current browser session
+    const isSessionActive =
+      typeof sessionStorage !== 'undefined' &&
+      sessionStorage.getItem('qartix_session_active') === 'true';
+
+    if (!isSessionActive) {
+      setCurrentUser(null);
+      setIsLoading(false);
+      return;
+    }
+
     try {
       const sessionData = await getSessionProfile();
       if (sessionData && sessionData.user && sessionData.profile) {
@@ -63,6 +74,9 @@ export function AuthProvider({ children }) {
   }, [syncSession]);
 
   const handleLogin = async (credentials) => {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem('qartix_session_active', 'true');
+    }
     const result = await loginUser(credentials);
     if (result && result.session) {
       await syncSession();
@@ -71,6 +85,9 @@ export function AuthProvider({ children }) {
   };
 
   const handleSignup = async (credentials) => {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem('qartix_session_active', 'true');
+    }
     const result = await signupUser(credentials);
     if (result && result.session && !result.pendingApproval) {
       await syncSession();
@@ -79,7 +96,20 @@ export function AuthProvider({ children }) {
   };
 
   const handleLogout = async () => {
-    await logoutUser();
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.removeItem('qartix_session_active');
+    }
+    try {
+      await logoutUser();
+    } catch (e) {}
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k && (k.startsWith('sb-') || k.includes('auth'))) {
+          localStorage.removeItem(k);
+        }
+      }
+    } catch (e) {}
     setCurrentUser(null);
   };
 

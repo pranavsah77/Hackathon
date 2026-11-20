@@ -50,6 +50,9 @@ export default function App() {
 
   // Handle successful login/signup from AuthPage
   const handleAuthenticate = ({ role: authRole, user }) => {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem('qartix_session_active', 'true');
+    }
     if (authRole === 'student') {
       setStudentView('dashboard');
     } else {
@@ -77,12 +80,23 @@ export default function App() {
 
   // Handle Logout from any interface
   const handleLogout = async () => {
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.removeItem('qartix_session_active');
+    }
     try {
       await logout();
     } catch (e) {
       console.warn('Logout error:', e);
     }
-    setStudentView('landing');
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k && (k.startsWith('sb-') || k.includes('auth'))) {
+          localStorage.removeItem(k);
+        }
+      }
+    } catch (e) {}
+    setStudentView('dashboard');
     setWelcomeToast(null);
   };
 
